@@ -660,6 +660,7 @@ button.lk { cursor: pointer; }
 .ss-b:empty { display: none; }
 .ss-b p { margin: 6px 0 8px; }
 .ss-b .btn { margin-top: 2px; }
+.uil { direction: ltr; unicode-bidi: isolate; font-size: 12.5px; font-weight: 700; color: var(--ink); background: color-mix(in srgb, var(--ink) 8%, transparent); border-radius: 6px; padding: 1px 6px; -webkit-box-decoration-break: clone; box-decoration-break: clone; overflow-wrap: anywhere; }
 .mini-steps { margin: 4px 0 10px; padding-inline-start: 18px; display: flex; flex-direction: column; gap: 4px; }
 .ss-st { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 12.5px; font-weight: 700; }
 .ok-t { color: var(--good); }
@@ -689,6 +690,8 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.92em;
 .sug-body { margin-top: 6px; font-size: 14.5px; }
 .sug-body p { margin: 2px 0; }
 .sug-ul { margin: 2px 0; padding-inline-start: 18px; }
+.sug-ig { display: flex; gap: 6px; align-items: flex-start; }
+.sug-ig .ic { width: 16px; height: 16px; flex: none; margin-top: 3px; color: var(--ink-3); }
 .sug-why { font-size: 13px; color: var(--ink-2); margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line-2); }
 .sug-act { display: flex; gap: 8px; margin-top: 10px; }
 .msg-box { padding: 12px; border-radius: 12px; background: var(--field); border: 1px solid var(--line); font-size: 14px; line-height: 1.8; }
