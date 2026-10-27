@@ -3,7 +3,7 @@
 /* استودیو محتوا — اپ تولید و تحلیل محتوای اینستاگرام
  * همه‌ی داده‌ها فقط روی همین دستگاه ذخیره می‌شوند (IndexedDB).
  * این فایل از چند فایل منبع کنار هم ساخته شده؛ برای تغییر، بخش مربوط را پیدا کن. */
-const APP_VERSION = '1.1.2';
+const APP_VERSION = '1.1.3';
 const APP_ID = 'fitlife-studio';
 const DAY_MS = 86400000;
 const HOUR_MS = 3600000;
@@ -5791,9 +5791,10 @@ function viewIgSetup() {
   const fetchedOnce = !!(IG && IG.fetchedAt);
   const h = '<p class="muted small">یک بار راه‌اندازی می‌شه و بعدش همه‌چیز خودکاره.</p><ol class="setup">' +
     igSetupStep(1, 'ساخت اپ در Meta و گرفتن توکن اینستاگرام',
-      '<p>پیج باید Public و حرفه‌ای (Creator یا Business) باشه. این قدم رو با VPN انجام بده؛ با کامپیوتر راحت‌تره. متا ایران رو رسماً پشتیبانی نمی‌کنه و ممکنه حساب توسعه‌دهنده رو محدود کنه.</p><ol class="mini-steps">' +
-      '<li>' + uiL('developers.facebook.com/apps') + ' رو باز کن و با حساب فیسبوک وارد شو. اگه بار اوله، ثبت‌نام توسعه‌دهنده رو تموم کن.</li>' +
-      '<li>' + uiL('Create app') + ' رو بزن، اسم و ایمیل بده و ' + uiL('Next') + '.</li>' +
+      '<p>پیج باید Public و حرفه‌ای (Creator یا Business) باشه. این قدم رو با VPN انجام بده؛ با کامپیوتر راحت‌تره. متا ایران رو رسماً پشتیبانی نمی‌کنه و ممکنه حساب توسعه‌دهنده رو محدود کنه.</p>' +
+      '<p>لینک‌ها رو توی Chrome یا Safari باز کن، نه توی اپ فیسبوک، و قبلش توی همون مرورگر وارد ' + uiL('facebook.com') + ' شو؛ وگرنه متا ' + uiL('Page Not Found') + ' نشون می‌ده. روی گوشی ' + uiL('Desktop site') + ' مرورگر رو هم روشن کن.</p><ol class="mini-steps">' +
+      '<li>ثبت‌نام توسعه‌دهنده (فقط بار اول): دکمه‌ی «ثبت‌نام» پایین همین قدم ← ' + uiL('Next') + ' ← کد تأیید شماره و ایمیل ← انتخاب شغل (مثلاً ' + uiL('Other') + '). وقتی بالای صفحه ' + uiL('My Apps') + ' اومد، ثبت‌نام تمومه.</li>' +
+      '<li>' + uiL('My Apps') + ' ← ' + uiL('Create app') + ' ← اسم و ایمیل ← ' + uiL('Next') + '</li>' +
       '<li>از Use cases گزینه‌ی ' + uiL('Manage messaging & content on Instagram') + ' ← ' + uiL('Next') + '</li>' +
       '<li>' + uiL("I don't want to connect a business portfolio yet") + ' ← ' + uiL('Next') + ' ← ' + uiL('Next') + ' ← ' + uiL('Go to dashboard') + '</li>' +
       '<li>' + uiL('Customize the Manage messaging & content on Instagram use case') + ' ← توی صفحه‌ی ' + uiL('API setup with Instagram business login') + ' دکمه‌ی ' + uiL('Add all required permissions') + '</li>' +
@@ -5802,7 +5803,7 @@ function viewIgSetup() {
       '<li>دعوت رو از طرف پیج قبول کن: دکمه‌ی «پذیرش دعوت» پایین همین قدم ← ' + uiL('Tester Invites') + ' ← ' + uiL('Accept') + '</li>' +
       '<li>برگرد به ' + uiL('API setup with Instagram business login') + ' ← ' + uiL('Generate access tokens') + ' ← ' + uiL('Add account') + ' و ورود با پیج</li>' +
       '<li>' + uiL('Generate token') + ' ← تیک ' + uiL('I understand') + ' ← توکن رو کپی کن. فقط یک بار نشون داده می‌شه.</li></ol>' +
-      '<div class="btn-row"><a class="btn sm" href="https://developers.facebook.com/apps" target="_blank" rel="noopener">باز کردن Meta for Developers</a><a class="btn sm ghost" href="https://www.instagram.com/accounts/manage_access/" target="_blank" rel="noopener">پذیرش دعوت</a></div>') +
+      '<div class="btn-row"><a class="btn sm" href="https://developers.facebook.com/async/registration" target="_blank" rel="noopener">ثبت‌نام</a><a class="btn sm" href="https://developers.facebook.com/apps/creation/" target="_blank" rel="noopener">ساخت اپ</a><a class="btn sm ghost" href="https://www.instagram.com/accounts/manage_access/" target="_blank" rel="noopener">پذیرش دعوت</a></div>') +
     igSetupStep(2, 'ثبت دو Secret در ریپوی داده‌ها',
       '<p>صفحه‌ی Secrets رو باز کن و دو بار Secret بساز: ' + uiL('Name') + ' و ' + uiL('Secret') + ' رو پر کن و ' + uiL('Add secret') + ' رو بزن؛ برای دومی ' + uiL('New repository secret') + '.</p><ul class="mini-steps"><li><code>IG_TOKEN</code>: توکنی که از متا گرفتی</li><li><code>STUDIO_PAT</code>: همون توکن گیت‌هابی که توی اپ گذاشتی؛ با دکمه‌ی «کپی توکن گیت‌هاب» کپیش کن. با این، اسکریپت توکن اینستاگرام رو خودش تمدید می‌کنه.</li></ul>' +
       '<div class="btn-row"><a class="btn sm" href="' + esc(repoUrl + '/settings/secrets/actions/new') + '" target="_blank" rel="noopener">باز کردن Secrets</a><button type="button" class="btn sm ghost" data-copytoken>' + ic('copy') + 'کپی توکن گیت‌هاب</button></div><div class="ss-st" data-st-secrets></div>') +
