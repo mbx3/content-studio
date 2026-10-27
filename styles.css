@@ -72,6 +72,8 @@ button { cursor: pointer; }
 button:disabled { opacity: 0.35; cursor: default; }
 h1, h2, h3, p { margin: 0; }
 a { color: var(--gold-ink); }
+a.btn { color: var(--ink); text-decoration: none; }
+a.btn.primary { color: #1E1E1E; }
 [hidden] { display: none !important; }
 :focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 
@@ -331,13 +333,26 @@ input[type="time"].input { direction: ltr; text-align: center; }
 
 /* انتخاب تاریخ */
 .dp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.dp-head b { font-size: 16px; font-weight: 800; }
+.dp-title { flex: 1; display: flex; flex-direction: column; align-items: center; line-height: 1.45; }
+.dp-title b { font-size: 16px; font-weight: 800; }
+.dp-g { font-size: 12px; font-weight: 600; color: var(--ink-2); }
 .dp-grid { gap: 4px; }
-.dp-day { aspect-ratio: 1; border: 0; border-radius: 12px; background: transparent; font-size: 15px; font-weight: 600; }
-.dp-day.fri { color: var(--bad); }
+.dp-day {
+  aspect-ratio: 1; border: 0; border-radius: 12px; background: transparent; padding: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; line-height: 1.2;
+}
+.dp-day .dj { font-size: 15px; font-weight: 700; }
+.dp-day .dg { font-size: 10px; font-weight: 600; color: var(--ink-3); }
+.dp-day .dg.m1 { font-size: 9.5px; font-weight: 800; color: var(--gold-ink); }
+.dp-day.fri .dj { color: var(--bad); }
 .dp-day.today { box-shadow: inset 0 0 0 1.5px var(--gold); }
 .dp-day.on { background: var(--ink); color: var(--paper); }
+.dp-day.on .dj, .dp-day.on .dg { color: var(--paper); }
+.dp-sel { text-align: center; font-size: 13px; font-weight: 600; color: var(--ink-2); margin-top: 8px; min-height: 22px; }
 .dp-time { margin-top: 12px; }
+.dp-trow { display: flex; gap: 8px; align-items: center; }
+.dp-trow .input { flex: 1; }
+.dp-trow .chip { min-height: 46px; padding: 0 16px; }
 
 /* ---------- خانه ---------- */
 .hero { background: var(--hero); color: var(--hero-ink); border-radius: 20px; padding: 18px 18px 16px; margin-top: 8px; }
@@ -612,6 +627,80 @@ button.lk { cursor: pointer; }
   body.typing .nav, body.typing .fab { display: none; }
   body.typing .form-actions { bottom: 8px; }
 }
+
+/* ---------- پشتیبان خودکار ---------- */
+.note.danger { background: color-mix(in srgb, var(--bad) 9%, var(--card)); border-color: color-mix(in srgb, var(--bad) 30%, transparent); }
+.note.danger > .ic { color: var(--bad); }
+.sync-card .card-h b { display: inline-flex; align-items: center; gap: 8px; }
+.sync-card .card-h .ic { width: 20px; height: 20px; }
+.sync-card.on .card-h .ic { color: var(--good); }
+.sync-card.err .card-h .ic { color: var(--warn); }
+.sync-card.off .card-h .ic { color: var(--ink-3); }
+.sync-btn { position: relative; }
+.syncdot { position: absolute; top: 9px; inset-inline-end: 9px; width: 9px; height: 9px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 2px var(--paper); }
+.syncdot[data-state="error"] { background: var(--warn); }
+.syncdot[data-state="offline"], .syncdot[data-state="idle"] { background: var(--ink-3); }
+.syncdot[data-state="syncing"] { background: var(--gold); }
+.sync-err { color: var(--bad); font-size: 13.5px; font-weight: 600; margin: 4px 2px 8px; }
+.code-box { padding: 12px; border-radius: 12px; border: 1px dashed var(--line); background: var(--field); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.6; word-break: break-all; text-align: left; }
+.danger-t { color: var(--bad); }
+.cnt-badge { min-width: 22px; height: 22px; padding: 0 7px; border-radius: 999px; background: var(--gold); color: #1E1E1E; font-size: 12px; font-weight: 800; display: inline-grid; place-items: center; }
+.ric.gold { background: var(--gold-soft); color: var(--gold-ink); }
+
+/* مراحل راه‌اندازی */
+.setup { list-style: none; margin: 8px 0 14px; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.setup-step { background: var(--card); border: 1px solid var(--line-2); border-radius: 14px; padding: 12px 14px; }
+.setup-step.ok { border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.ss-h { display: flex; align-items: center; gap: 10px; }
+.ss-h b { font-weight: 800; font-size: 14.5px; }
+.ss-n { width: 26px; height: 26px; border-radius: 50%; background: var(--ink); color: var(--paper); display: grid; place-items: center; font-size: 13px; font-weight: 800; flex: none; }
+.ss-n .ic { width: 16px; height: 16px; stroke-width: 2.6; }
+.setup-step.ok .ss-n { background: var(--good); }
+.ss-b { padding-inline-start: 36px; font-size: 13.5px; color: var(--ink-2); }
+.ss-b:empty { display: none; }
+.ss-b p { margin: 6px 0 8px; }
+.ss-b .btn { margin-top: 2px; }
+.mini-steps { margin: 4px 0 10px; padding-inline-start: 18px; display: flex; flex-direction: column; gap: 4px; }
+.ss-st { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 12.5px; font-weight: 700; }
+.ok-t { color: var(--good); }
+.no-t { color: var(--ink-3); }
+code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.92em; background: var(--line-2); padding: 1px 5px; border-radius: 5px; direction: ltr; unicode-bidi: isolate; }
+
+/* ---------- تحلیل‌های Claude ---------- */
+.claude-head { margin: 6px 2px 12px; }
+.claude-head h2 { font-size: 20px; font-weight: 800; line-height: 1.6; }
+.q-box { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: var(--gold-soft); font-size: 14px; }
+.q-box .ic { color: var(--gold-ink); width: 18px; height: 18px; margin-top: 3px; }
+.md { font-size: 14.5px; line-height: 1.85; }
+.md .md-h { font-size: 16px; font-weight: 800; margin: 14px 0 4px; }
+.md h4.md-h { font-size: 14.5px; }
+.md > :first-child { margin-top: 0; }
+.md p { margin: 6px 0; }
+.md ul, .md ol { margin: 6px 0; padding-inline-start: 22px; }
+.md li { margin: 3px 0; }
+.md blockquote { margin: 8px 0; padding: 6px 12px; border-inline-start: 3px solid var(--gold); color: var(--ink-2); background: var(--paper); border-radius: 6px; }
+.md-tw { overflow-x: auto; margin: 8px -4px; }
+.md-t { border-collapse: collapse; width: 100%; font-size: 13px; }
+.md-t th, .md-t td { padding: 6px 8px; border-bottom: 1px solid var(--line-2); text-align: start; vertical-align: top; }
+.md-t th { font-weight: 800; color: var(--ink-2); border-bottom-color: var(--line); white-space: nowrap; }
+.sug { background: var(--card); border: 1px solid var(--line-2); border-radius: 14px; padding: 12px 14px; }
+.sug.done { opacity: 0.72; }
+.sug-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sug-body { margin-top: 6px; font-size: 14.5px; }
+.sug-body p { margin: 2px 0; }
+.sug-ul { margin: 2px 0; padding-inline-start: 18px; }
+.sug-why { font-size: 13px; color: var(--ink-2); margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line-2); }
+.sug-act { display: flex; gap: 8px; margin-top: 10px; }
+.msg-box { padding: 12px; border-radius: 12px; background: var(--field); border: 1px solid var(--line); font-size: 14px; line-height: 1.8; }
+
+/* ---------- اینستاگرام ---------- */
+.ig-act { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.ig-card { cursor: default; }
+.ig-note .link { padding: 0; }
+.fdelta { min-width: 46px; text-align: end; font-weight: 800; font-size: 13.5px; color: var(--ink-3); }
+.fdelta.good { color: var(--good); }
+.fdelta.bad { color: var(--bad); }
+.row .rt b .badge { margin-inline-start: 8px; vertical-align: 1px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }

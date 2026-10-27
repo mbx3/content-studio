@@ -1,6 +1,6 @@
 /* سرویس‌ورکر استودیو محتوا: اپ را روی گوشی نگه می‌دارد تا بدون اینترنت هم باز شود.
    هر بار فایل‌های اپ را عوض کردی، عدد VERSION را هم عوض کن تا گوشی نسخه‌ی تازه را بگیرد. */
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const CACHE = 'studio-' + VERSION;
 const FONT_CACHE = 'studio-fonts';
 const ASSETS = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable.png'];

@@ -3,7 +3,7 @@
 /* استودیو محتوا — اپ تولید و تحلیل محتوای اینستاگرام
  * همه‌ی داده‌ها فقط روی همین دستگاه ذخیره می‌شوند (IndexedDB).
  * این فایل از چند فایل منبع کنار هم ساخته شده؛ برای تغییر، بخش مربوط را پیدا کن. */
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const APP_ID = 'fitlife-studio';
 const DAY_MS = 86400000;
 const HOUR_MS = 3600000;
@@ -309,6 +309,34 @@ function fmtWhen(iso, time) {
   return fmtJShort(iso) + (time ? '، ساعت ' + faNum(time) : '');
 }
 
+/* ---------- تاریخ میلادی (اینستاگرام تاریخ‌ها را میلادی نشان می‌دهد) ---------- */
+const G_MONTHS = ['ژانویه', 'فوریه', 'مارس', 'آوریل', 'مه', 'ژوئن', 'ژوئیه', 'اوت', 'سپتامبر', 'اکتبر', 'نوامبر', 'دسامبر'];
+
+function gParts(iso) {
+  const p = iso.split('-').map(Number);
+  return { gy: p[0], gm: p[1], gd: p[2] };
+}
+
+function fmtG(iso, withYear) {
+  const g = gParts(iso);
+  const showYear = withYear === true || (withYear !== false && g.gy !== new Date().getFullYear());
+  return faNum(g.gd) + ' ' + G_MONTHS[g.gm - 1] + (showYear ? ' ' + faNum(g.gy) : '');
+}
+
+// یک ماه شمسی همیشه دو ماه میلادی را می‌پوشاند
+function gMonthsLabel(monthStartISO) {
+  const j = isoToJ(monthStartISO);
+  const a = gParts(monthStartISO);
+  const b = gParts(jToISO(j.jy, j.jm, jMonthLength(j.jy, j.jm)));
+  if (a.gy === b.gy) return G_MONTHS[a.gm - 1] + ' و ' + G_MONTHS[b.gm - 1] + ' ' + faNum(b.gy);
+  return G_MONTHS[a.gm - 1] + ' ' + faNum(a.gy) + ' و ' + G_MONTHS[b.gm - 1] + ' ' + faNum(b.gy);
+}
+
+function fmtWhenG(iso, time) {
+  if (!iso) return 'انتخاب تاریخ';
+  return fmtWhen(iso, time) + (relDayName(iso) ? '' : ' (' + fmtG(iso) + ')');
+}
+
 /* ---------- مقادیر پیش‌فرض ---------- */
 const GOALS = [
   { id: 'attract', name: 'جذب' },
@@ -463,7 +491,10 @@ let S = null; // کل داده‌های اپ
 
 const IDB_NAME = 'fitlife-studio';
 const IDB_STORE = 'kv';
+const LS_STATE = IDB_NAME + ':state'; // نسخه‌ی دوم داده‌ها در localStorage
+const COLLS = ['items', 'leads', 'learnings', 'snippets', 'questions'];
 let _db = null;
+let _storageWarn = null; // اگر IndexedDB باز نشد
 
 function idbOpen() {
   return new Promise((resolve, reject) => {
@@ -500,13 +531,21 @@ function emptyState() {
   return {
     app: APP_ID,
     version: 1,
-    meta: { createdAt: new Date().toISOString(), lastBackupAt: null, savedAt: null },
+    meta: { createdAt: new Date().toISOString(), lastBackupAt: null, savedAt: null, timeFix1: true, settingsAt: null },
     settings: defaultSettings(),
     items: [],
     leads: [],
     learnings: [],
     snippets: [],
+    questions: [],
+    inbox: {},
+    igIgnored: [],
+    tomb: {},
   };
+}
+
+function isEmptyState(st) {
+  return !st || COLLS.every((k) => !st[k] || !st[k].length);
 }
 
 function normItem(it) {
@@ -531,6 +570,8 @@ function normItem(it) {
   return it;
 }
 
+let _migrated = false;
+
 function migrate(st) {
   const d = defaultSettings();
   const cur = st.settings || {};
@@ -542,10 +583,22 @@ function migrate(st) {
   if (!st.settings.series.some((s) => s.id === 'other')) st.settings.series.push({ id: 'other', name: 'سایر', short: 'سایر', ci: 6 });
   if (!Array.isArray(st.settings.checklist)) st.settings.checklist = d.checklist;
   if (!Array.isArray(st.settings.checkpoints) || !st.settings.checkpoints.length) st.settings.checkpoints = d.checkpoints;
-  for (const k of ['items', 'leads', 'learnings', 'snippets']) if (!Array.isArray(st[k])) st[k] = [];
+  for (const k of COLLS) if (!Array.isArray(st[k])) st[k] = [];
+  if (!st.inbox || typeof st.inbox !== 'object' || Array.isArray(st.inbox)) st.inbox = {};
+  if (!Array.isArray(st.igIgnored)) st.igIgnored = [];
+  if (!st.tomb || typeof st.tomb !== 'object' || Array.isArray(st.tomb)) st.tomb = {};
   st.meta = Object.assign({ createdAt: new Date().toISOString(), lastBackupAt: null, savedAt: null }, st.meta || {});
   st.items.forEach(normItem);
-  for (const k of ['leads', 'learnings', 'snippets']) {
+  // نسخه‌ی ۱.۰.۰ برای پستی که بعداً وارد می‌شد، ساعت همان لحظه‌ی ثبت را می‌گذاشت.
+  // ساعت پست‌هایی که تاریخ انتشارشان قبل از روز ثبتشان در اپ است، یک بار پاک می‌شود.
+  if (!st.meta.timeFix1) {
+    for (const it of st.items) {
+      if (it.publishDate && it.publishTime && it.createdAt && it.publishDate < dateToISO(new Date(it.createdAt))) it.publishTime = null;
+    }
+    st.meta.timeFix1 = true;
+    _migrated = true;
+  }
+  for (const k of ['leads', 'learnings', 'snippets', 'questions']) {
     st[k].forEach((x) => {
       if (!x.id) x.id = uid(k[0]);
       if (!x.updatedAt) x.updatedAt = x.createdAt || new Date().toISOString();
@@ -557,26 +610,66 @@ function migrate(st) {
   return st;
 }
 
-async function loadState() {
-  try { _db = await idbOpen(); } catch (e) { _db = null; }
-  let st = null;
-  try { st = await kvGet('state'); } catch (e) { console.warn(e); }
-  if (!st) {
-    try {
-      const v = localStorage.getItem(IDB_NAME + ':state');
-      if (v) st = JSON.parse(v);
-    } catch (e) { /* ignore */ }
+function _readMirror() {
+  try {
+    const v = localStorage.getItem(LS_STATE);
+    return v ? JSON.parse(v) : null;
+  } catch (e) {
+    return null;
   }
+}
+
+function _newer(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const sa = (a.meta && a.meta.savedAt) || '';
+  const sb = (b.meta && b.meta.savedAt) || '';
+  return sb > sa ? b : a;
+}
+
+let _lastSettingsJSON = null;
+
+async function loadState() {
+  let fromIdb = null;
+  try {
+    _db = await idbOpen();
+  } catch (e) {
+    _db = null;
+    _storageWarn = 'idb';
+  }
+  if (_db) {
+    try {
+      fromIdb = await idbRun('readonly', (st) => st.get('state'));
+    } catch (e) {
+      console.warn(e);
+      _storageWarn = 'idb';
+    }
+  }
+  // هر کدام تازه‌تر بود؛ اگر یکی از دست رفته باشد، دیگری جایش را می‌گیرد
+  const st = _newer(fromIdb || null, _readMirror());
   S = st ? migrate(st) : emptyState();
+  _lastSettingsJSON = JSON.stringify(S.settings);
+  if (_migrated || (st && !fromIdb && _db)) {
+    _migrated = false;
+    await save(true);
+  }
   return S;
 }
 
 let _saveTimer = null;
 let _saveFailedOnce = false;
+let _pendingLoud = false; // فقط تغییرهای کاربر همگام‌سازی را صدا می‌زنند، نه ذخیره‌های خود همگام‌سازی
+
 async function _doSave() {
   _saveTimer = null;
+  const loud = _pendingLoud;
+  _pendingLoud = false;
   try {
-    S.meta.savedAt = new Date().toISOString();
+    const now = new Date().toISOString();
+    const sj = JSON.stringify(S.settings);
+    if (_lastSettingsJSON !== null && sj !== _lastSettingsJSON) S.meta.settingsAt = now;
+    _lastSettingsJSON = sj;
+    S.meta.savedAt = now;
     await kvSet('state', S);
     _saveFailedOnce = false;
   } catch (e) {
@@ -584,21 +677,65 @@ async function _doSave() {
     if (!_saveFailedOnce) toast('ذخیره نشد. یک پشتیبان بگیر و اپ رو دوباره باز کن.');
     _saveFailedOnce = true;
   }
+  if (_db) {
+    try {
+      localStorage.setItem(LS_STATE, JSON.stringify(S));
+    } catch (e) {
+      // فضای localStorage پر است؛ نسخه‌ی کهنه نباید جای نسخه‌ی اصلی را بگیرد
+      try { localStorage.removeItem(LS_STATE); } catch (e2) { /* ignore */ }
+    }
+  }
+  if (loud && typeof onStateSaved === 'function') onStateSaved();
 }
 
-function save(immediate) {
+function save(immediate, quiet) {
+  if (!quiet) _pendingLoud = true;
   if (_saveTimer) clearTimeout(_saveTimer);
   if (immediate) return _doSave();
   _saveTimer = setTimeout(_doSave, 250);
 }
 
 function flushSave() {
-  if (_saveTimer) { clearTimeout(_saveTimer); _doSave(); }
+  if (_saveTimer) {
+    clearTimeout(_saveTimer);
+    return _doSave();
+  }
+  return Promise.resolve();
 }
 
 function touch(obj) {
   if (obj) obj.updatedAt = new Date().toISOString();
   save();
+}
+
+// حذف یک مورد؛ نشانه‌ی حذف نگه داشته می‌شود تا همگام‌سازی آن را برنگرداند
+function markDeleted(id) {
+  if (id) S.tomb[id] = new Date().toISOString();
+}
+
+// بعد از جایگزینی کامل، نسخه‌ی روی گیت‌هاب هم بدون ادغام جایگزین می‌شود
+function markForcePush() {
+  S.meta.forcePushAt = new Date().toISOString();
+}
+
+// متن ثابت داده‌ها برای فهمیدن اینکه چیزی واقعاً عوض شده یا نه
+function canonicalState(st) {
+  const meta = Object.assign({}, st.meta);
+  delete meta.savedAt;
+  delete meta.lastBackupAt;
+  return JSON.stringify(Object.assign({}, st, { meta }));
+}
+
+function hashStr(str) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
 }
 
 async function requestPersist() {
@@ -741,6 +878,7 @@ async function keepSafetyCopy() {
 async function replaceAll(data) {
   await keepSafetyCopy();
   S = migrate(JSON.parse(JSON.stringify(data)));
+  markForcePush();
   await save(true);
 }
 
@@ -748,7 +886,7 @@ async function mergeAll(data) {
   await keepSafetyCopy();
   const inc = migrate(JSON.parse(JSON.stringify(data)));
   let added = 0, updated = 0;
-  for (const k of ['items', 'leads', 'learnings', 'snippets']) {
+  for (const k of COLLS) {
     const map = new Map(S[k].map((x) => [x.id, x]));
     for (const x of inc[k]) {
       const cur = map.get(x.id);
@@ -776,6 +914,7 @@ async function restorePrev() {
   if (!prev) return false;
   const cur = JSON.parse(JSON.stringify(S));
   S = migrate(prev);
+  markForcePush();
   await kvSet('prev', cur);
   await save(true);
   return true;
@@ -788,6 +927,7 @@ async function hasPrev() {
 async function resetAll() {
   await keepSafetyCopy();
   S = emptyState();
+  markForcePush();
   await save(true);
 }
 
@@ -1136,6 +1276,9 @@ const ICONS = {
   eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/>',
   target: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor"/>',
   star: '<path d="m12 3.8 2.5 5.1 5.6.8-4 3.9.9 5.6-5-2.6-5 2.6.9-5.6-4-3.9 5.6-.8L12 3.8Z"/>',
+  cloud: '<path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.2 4.7 4.7 0 0 0 7 18.5Z"/>',
+  cloudOff: '<path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.2 4.7 4.7 0 0 0 7 18.5Z"/><path d="M4 4l16 16"/>',
+  camera: '<rect x="3.5" y="6.5" width="17" height="13" rx="3"/><path d="M8.5 6.5 10 4h4l1.5 2.5"/><circle cx="12" cy="13" r="3.5"/>',
   grid: '<rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/>',
   list: '<path d="M8.5 6.5h11M8.5 12h11M8.5 17.5h11M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01"/>',
   palette: '<path d="M12 3.5a8.5 8.5 0 0 0 0 17c1.3 0 1.8-1 1.4-2-.5-1.2.1-2.5 1.5-2.5h2.1a3.5 3.5 0 0 0 3.5-3.5c0-5-3.8-9-8.5-9Z"/><circle cx="7.8" cy="11" r="1"/><circle cx="10.5" cy="7.5" r="1"/><circle cx="14.8" cy="7.8" r="1"/>',
@@ -1309,15 +1452,22 @@ function pickMany(opts) {
   });
 }
 
-/* ---------- انتخاب تاریخ شمسی ---------- */
+/* ---------- انتخاب تاریخ شمسی (با روز میلادی کنار هر روز) ---------- */
+let _lastPickedISO = null;
+
+// opts: title, date, time, touched, withTime, nowIfToday, rememberLast, allowClear, unknownLabel, timeHint
+// خروجی: {date, time, touched}؛ null یعنی «بدون تاریخ»؛ undefined یعنی بسته شد
 function pickDate(opts) {
   opts = opts || {};
   return new Promise((resolve) => {
     let result;
-    let sel = opts.date || null;
-    let viewISO = jMonthStartISO(sel || todayISO());
-    let time = opts.time || (opts.withTime ? nowTime() : null);
     const today = todayISO();
+    let sel = opts.date || null;
+    let viewISO = jMonthStartISO(sel || (opts.rememberLast && _lastPickedISO) || today);
+    let time = opts.time || null;
+    let touched = opts.touched != null ? !!opts.touched : opts.time != null;
+    // ساعتی که کاربر صریحاً انتخاب نکرده: فقط برای «امروز» و فقط اگر خواسته شده، ساعت الان
+    const effTime = () => (touched ? time : opts.nowIfToday && sel === today ? nowTime() : null);
 
     function grid() {
       const j = isoToJ(viewISO);
@@ -1327,17 +1477,24 @@ function pickDate(opts) {
       for (let i = 0; i < off; i++) h += '<div></div>';
       for (let d = 1; d <= len; d++) {
         const iso = jToISO(j.jy, j.jm, d);
+        const g = gParts(iso);
         const cls = (iso === sel ? ' on' : '') + (iso === today ? ' today' : '') + (satIndex(iso) === 6 ? ' fri' : '');
-        h += '<button type="button" class="dp-day' + cls + '" data-d="' + iso + '">' + faNum(d) + '</button>';
+        h += '<button type="button" class="dp-day' + cls + '" data-d="' + iso + '" aria-label="' + fmtJ(iso, { year: true }) + '، ' + fmtG(iso, true) + '">' +
+          '<span class="dj">' + faNum(d) + '</span><span class="dg' + (g.gd === 1 ? ' m1' : '') + '">' + (g.gd === 1 ? G_MONTHS[g.gm - 1] : faNum(g.gd)) + '</span></button>';
       }
       return h + '</div>';
     }
 
+    const selText = () => (sel ? fmtJ(sel, { weekday: true, year: true }) + '، برابر ' + fmtG(sel, true) : 'یک روز رو انتخاب کن');
     const body =
-      '<div class="dp-head"><button type="button" class="icon-btn" data-m="-1" aria-label="ماه قبل">' + ic('chevR') + '</button><b data-mt>' + fmtJMonth(viewISO) + '</b>' +
+      '<div class="dp-head"><button type="button" class="icon-btn" data-m="-1" aria-label="ماه قبل">' + ic('chevR') + '</button>' +
+      '<div class="dp-title"><b data-mt>' + fmtJMonth(viewISO) + '</b><span class="dp-g" data-gt>' + gMonthsLabel(viewISO) + '</span></div>' +
       '<button type="button" class="icon-btn" data-m="1" aria-label="ماه بعد">' + ic('chevL') + '</button></div>' +
       '<div data-grid>' + grid() + '</div>' +
-      (opts.withTime ? '<div class="field dp-time"><div class="flabel">ساعت</div><input class="input" type="time" value="' + (time || '') + '" data-time></div>' : '') +
+      '<div class="dp-sel" data-sel>' + selText() + '</div>' +
+      (opts.withTime ? '<div class="field dp-time"><div class="flabel">ساعت</div><div class="dp-trow"><input class="input" type="time" data-time aria-label="ساعت">' +
+        '<button type="button" class="chip" data-tunk aria-pressed="false">' + esc(opts.unknownLabel || 'نامعلوم') + '</button></div>' +
+        (opts.timeHint ? '<div class="fhint">' + esc(opts.timeHint) + '</div>' : '') + '</div>' : '') +
       '<div class="sheet-actions">' + (opts.withTime ? '<button type="button" class="btn primary" data-ok>تأیید</button>' : '') +
       '<button type="button" class="btn" data-today>امروز</button>' +
       (opts.allowClear ? '<button type="button" class="btn ghost" data-clear>بدون تاریخ</button>' : '') + '</div>';
@@ -1346,21 +1503,47 @@ function pickDate(opts) {
       title: opts.title || 'انتخاب تاریخ',
       body,
       onMount: (b) => {
+        const ti = b.querySelector('[data-time]');
+        const tu = b.querySelector('[data-tunk]');
+        const markUnknown = (unknown) => {
+          tu.classList.toggle('on', unknown);
+          tu.setAttribute('aria-pressed', String(unknown));
+        };
+        const syncTime = () => {
+          if (!ti) return;
+          const t = effTime();
+          ti.value = t || '';
+          markUnknown(!t);
+        };
         const redraw = () => {
           b.querySelector('[data-grid]').innerHTML = grid();
           b.querySelector('[data-mt]').textContent = fmtJMonth(viewISO);
+          b.querySelector('[data-gt]').textContent = gMonthsLabel(viewISO);
+          b.querySelector('[data-sel]').textContent = selText();
         };
-        const finish = () => { result = { date: sel, time }; closeSheet(); };
+        const finish = () => {
+          result = { date: sel, time: opts.withTime ? effTime() : null, touched };
+          if (sel) _lastPickedISO = sel;
+          closeSheet();
+        };
+        syncTime();
         b.addEventListener('click', (e) => {
           const m = e.target.closest('[data-m]');
           if (m) { viewISO = addJMonths(viewISO, +m.dataset.m); redraw(); return; }
           const d = e.target.closest('[data-d]');
-          if (d) { sel = d.dataset.d; redraw(); if (!opts.withTime) finish(); return; }
+          if (d) { sel = d.dataset.d; redraw(); syncTime(); if (!opts.withTime) finish(); return; }
           if (e.target.closest('[data-today]')) {
             sel = today;
             viewISO = jMonthStartISO(today);
             redraw();
+            syncTime();
             if (!opts.withTime) finish();
+            return;
+          }
+          if (e.target.closest('[data-tunk]')) {
+            time = null;
+            touched = true;
+            syncTime();
             return;
           }
           if (e.target.closest('[data-ok]')) {
@@ -1370,8 +1553,15 @@ function pickDate(opts) {
           }
           if (e.target.closest('[data-clear]')) { result = null; closeSheet(); }
         });
-        const ti = b.querySelector('[data-time]');
-        if (ti) ti.addEventListener('change', () => { time = ti.value || null; });
+        if (ti) {
+          const onTime = () => {
+            time = ti.value || null;
+            touched = true;
+            markUnknown(!time);
+          };
+          ti.addEventListener('change', onTime);
+          ti.addEventListener('input', onTime);
+        }
       },
       onClose: () => resolve(result),
     });
@@ -1691,9 +1881,10 @@ function heroHtml() {
 
 function onboardingHtml() {
   return '<section class="hero"><div class="hero-k">شروع</div><h2>استودیو آماده‌ست</h2>' +
-    '<p>اگه فایل اطلاعات اولیه (پست‌ها، آمارها و درس‌هات) رو داری، اول همون رو وارد کن. بعدش هر ایده، سناریو و آماری همین‌جا ثبت می‌شه.</p>' +
-    '<div class="hero-actions"><button type="button" class="btn primary" data-act="import">' + ic('upload') + 'وارد کردن فایل</button>' +
-    '<button type="button" class="btn on-dark" data-act="newIdea">اول یک ایده ثبت کنم</button></div></section>' +
+    '<p>اگه قبلاً پشتیبان خودکار رو روشن کرده بودی، با کد بازیابی همه‌چیز از گیت‌هاب برمی‌گرده. اگه فایل پشتیبان یا فایل اطلاعات اولیه داری، اون رو وارد کن.</p>' +
+    '<div class="hero-actions"><button type="button" class="btn primary" data-act="restore">' + ic('cloud') + 'بازگردانی از گیت‌هاب</button>' +
+    '<button type="button" class="btn on-dark" data-act="import">' + ic('upload') + 'وارد کردن فایل</button>' +
+    '<button type="button" class="btn on-dark" data-act="newIdea">شروع از صفر</button></div></section>' +
     '<section class="sec">' + secHead('روال کار') + '<ol class="steps">' +
     '<li><b>ثبت ایده، همون لحظه.</b> سر شیفت یا وسط مطب، با دکمه‌ی + پایین صفحه.</li>' +
     '<li><b>تولید مرحله‌به‌مرحله.</b> سناریو، هوک، کپشن و منابع داخل خود پست؛ پرامپت‌های Claude آماده‌ی کپی.</li>' +
@@ -1707,18 +1898,31 @@ function installHtml() {
 }
 
 function backupNoteHtml() {
-  if (!S.items.length || !S.settings.backupDays) return '';
-  const d = daysSinceBackup();
-  if (d != null && d < S.settings.backupDays) return '';
-  return '<div class="note warn">' + ic('shield') + '<div><b>' + (d == null ? 'هنوز پشتیبان نگرفتی' : 'آخرین پشتیبان ' + fmtAgoDays(d) + ' بوده') + '</b>' +
-    '<p>داده‌ها فقط روی همین گوشی‌ان. یک نسخه برای خودت توی تلگرام بفرست.</p>' +
-    '<button type="button" class="btn sm" data-act="backup">' + ic('share') + 'گرفتن پشتیبان</button></div></div>';
+  if (!S.items.length) return '';
+  if (SYNC) {
+    if (!SYNC.lastError) return '';
+    return '<div class="note warn">' + ic('alert') + '<div><b>پشتیبان خودکار کار نمی‌کنه</b><p>' + esc(SYNC.lastError) + '</p>' +
+      '<button type="button" class="btn sm" data-go="#/backup">بررسی</button></div></div>';
+  }
+  return '<div class="note warn">' + ic('cloud') + '<div><b>پشتیبان خودکار خاموشه</b>' +
+    '<p>داده‌ها فقط روی همین گوشی‌ان و اگه مرورگر پاکشون کنه، از دست می‌رن. با روشن کردن پشتیبان خودکار، بعد از هر تغییر یک نسخه توی گیت‌هاب ذخیره می‌شه.</p>' +
+    '<div class="row-actions"><button type="button" class="btn sm primary" data-act="connect">روشن کردن</button><button type="button" class="btn sm ghost" data-act="backup">فایل پشتیبان</button></div></div></div>';
 }
 
 function todoHtml() {
   const due = dueList().slice(1);
   const soon = upcomingDue(12);
   const rows = [];
+  const unread = inboxList().filter((e) => !e.readAt);
+  if (unread.length) {
+    const e0 = unread[0];
+    rows.push('<button type="button" class="row" data-go="' + (unread.length === 1 ? '#/claude/' + encodeURIComponent(e0.key) : '#/claude') + '"><span class="ric gold">' + ic('spark') + '</span><span class="rt"><b>' +
+      (unread.length === 1 ? 'تحلیل تازه از Claude: ' + esc(e0.title) : faNum(unread.length) + ' تحلیل تازه از Claude') + '</b><span>' + faNum(unread.reduce((a, e) => a + pendingCount(e), 0)) + ' پیشنهاد برای بررسی</span></span>' + ic('chevL') + '</button>');
+  }
+  const igUn = SYNC && IG ? igUnlinked().length : 0;
+  if (igUn) {
+    rows.push('<button type="button" class="row" data-go="#/ig"><span class="ric">' + ic('camera') + '</span><span class="rt"><b>' + faNum(igUn) + ' پست اینستاگرام هنوز به اپ وصل نشده</b><span>وصلشون کن تا آمارشون خودکار بیاد</span></span>' + ic('chevL') + '</button>');
+  }
   due.forEach((d) => {
     rows.push('<button type="button" class="row" data-go="#/item/' + d.it.id + '/stat/new?cp=' + d.c + '"><span class="ric">' + ic('clock') + '</span><span class="rt"><b>آمار ' + checkpointName(d.c) + '‌ی «' + esc(d.it.title) + '»</b><span>از انتشار ' + fmtHours(hoursSincePub(d.it)) + ' گذشته</span></span>' + ic('chevL') + '</button>');
   });
@@ -1816,7 +2020,7 @@ function itemsByDate(fromISO, toISO) {
 }
 
 function viewHome() {
-  const parts = [];
+  const parts = [contextWarnHtml()];
   if (_installEvt && !isStandalone()) parts.push(installHtml());
   if (!S.items.length) {
     parts.push(onboardingHtml());
@@ -1835,12 +2039,15 @@ function viewHome() {
     tab: 'home',
     html: parts.join(''),
     fab: { icon: 'plus', label: 'افزودن', fn: quickAdd },
+    actions: SYNC ? [{ icon: SYNC.lastError ? 'cloudOff' : 'cloud', label: 'پشتیبان خودکار: ' + syncWhenText(), fn: () => go('#/backup'), sync: true }] : [],
     mount: (root) => {
       root.addEventListener('click', (e) => {
         const a = actEl(e);
         if (!a) return;
         const act = a.dataset.act;
         if (act === 'newIdea') ideaSheet();
+        else if (act === 'connect') connectSheet();
+        else if (act === 'restore') connectSheet({ restore: true });
         else if (act === 'import') pickImportFile();
         else if (act === 'backup') backupSheet();
         else if (act === 'install') doInstall();
@@ -1858,6 +2065,7 @@ function viewHome() {
 function quickAdd() {
   const opts = [
     ['idea', 'bulb', 'ایده‌ی جدید', 'سؤال بیمار، کامنت یا موضوع تازه'],
+    ['pub', 'film', 'پست منتشرشده', 'پستی که قبلاً گذاشتی و توی اپ نیست'],
     ['stat', 'chart', 'ثبت آمار', 'برای یکی از پست‌های منتشرشده'],
     ['lead', 'msg', 'دایرکت یا نوبت', 'و این‌که از کدوم پست اومده'],
     ['learning', 'book', 'درس جدید', 'چیزی که از یک پست فهمیدی'],
@@ -1873,6 +2081,7 @@ function quickAdd() {
         const k = r.dataset.q;
         closeSheet(() => {
           if (k === 'idea') ideaSheet();
+          else if (k === 'pub') pastPostSheet();
           else if (k === 'stat') pickPostForStat();
           else if (k === 'lead') leadSheet();
           else if (k === 'learning') learningSheet();
@@ -1932,6 +2141,64 @@ function ideaSheet(preset) {
   });
 }
 
+/* ---------- ثبت پستی که قبلاً منتشر شده ---------- */
+function pastPostSheet() {
+  const d = newItem({ series: _lastSeries || 'sci', stage: 'published', format: 'reel', pubType: 'normal' });
+  const pd = { date: null, time: null, touched: false };
+  const L = S.settings.lists;
+  const dateText = () => fmtWhenG(pd.date, pd.time);
+  const body =
+    fieldHtml('عنوان', taHtml('title', '', { rows: 2, ph: 'اسمی که خودت پست رو باهاش می‌شناسی', af: true })) +
+    fieldHtml('تاریخ انتشار', '<button type="button" class="input date-btn" data-pd>' + ic('calendar') + '<span>' + dateText() + '</span></button>', 'همون تاریخی که زیر پست توی اینستاگرام نوشته؛ ساعت لازم نیست.') +
+    fieldHtml('سری', chipsHtml('series', seriesOptions(), d.series, { clearable: false })) +
+    fieldHtml('نوع انتشار', chipsHtml('pubType', idOptions(PUBTYPES), d.pubType, { clearable: false })) +
+    fieldHtml('مدت ویدیو (ثانیه)', inputHtml('durationSec', null, { num: true, ph: 'مثلاً ۴۵' })) +
+    '<details class="more-fields" open><summary>برچسب‌های تحلیل</summary>' +
+    fieldHtml('هدف', chipsHtml('goal', idOptions(GOALS), d.goal)) +
+    fieldHtml('فرمت', chipsHtml('format', idOptions(FORMATS), d.format, { clearable: false })) +
+    fieldHtml('سبک اجرا', chipsHtml('style', L.styles, d.style)) +
+    fieldHtml('نوع هوک', chipsHtml('hookType', L.hookTypes, d.hookType)) +
+    fieldHtml('نوع CTA', chipsHtml('ctaType', L.ctaTypes, d.ctaType)) + '</details>' +
+    '<div class="sheet-actions"><button type="button" class="btn primary" data-save-stat>ثبت و وارد کردن آمار</button><button type="button" class="btn" data-save>فقط ثبت</button></div>';
+  openSheet({
+    title: 'پست منتشرشده',
+    tall: true,
+    body,
+    onMount: (b) => {
+      bindForm(b, d);
+      b.addEventListener('click', async (e) => {
+        if (e.target.closest('[data-pd]')) {
+          const r = await pickDate(pubDateOpts(pd.date, pd.time, pd.touched, { title: 'تاریخ انتشار', nowIfToday: false }));
+          if (r) {
+            pd.date = r.date;
+            pd.time = r.time;
+            pd.touched = r.touched;
+            b.querySelector('[data-pd] span').textContent = dateText();
+          }
+          return;
+        }
+        const s = e.target.closest('[data-save],[data-save-stat]');
+        if (!s) return;
+        d.title = (d.title || '').trim();
+        if (!d.title) { toast('عنوان رو بنویس'); b.querySelector('textarea').focus(); return; }
+        d.publishDate = pd.date;
+        d.publishTime = pd.date ? pd.time : null;
+        d.order = nextOrder();
+        S.items.push(d);
+        _lastSeries = d.series;
+        touch(d);
+        requestPersist();
+        const toStat = s.hasAttribute('data-save-stat');
+        closeSheet(() => {
+          toast('پست ثبت شد');
+          if (toStat) go('#/item/' + d.id + '/stat/new');
+          else rerender();
+        });
+      });
+    },
+  });
+}
+
 /* ---------- فهرست محتوا: ایده‌ها، در تولید، منتشرشده ---------- */
 let _contentSearch = '';
 
@@ -1980,7 +2247,8 @@ function pubCardHtml(it, dueMap) {
     (due ? badgeHtml('آمار ' + checkpointName(due.c), 'warn', 'clock') : '') +
     '<span class="icard-date">' + (it.publishDate ? fmtJ(it.publishDate) : 'بدون تاریخ') + '</span></div>' +
     '<h3>' + esc(it.title || 'بدون عنوان') + '</h3>' +
-    (stats ? '<div class="stats-row">' + stats + '</div>' : '<div class="icard-meta">هنوز آماری ثبت نشده</div>') + '</article>';
+    (stats ? '<div class="stats-row">' + stats + '</div>' : '<div class="icard-meta">هنوز آماری ثبت نشده</div>') +
+    (it.publishDate ? '' : '<div class="icard-foot"><button type="button" class="btn sm" data-act="pubdate" data-id="' + it.id + '">' + ic('calendar') + 'ثبت تاریخ انتشار</button></div>') + '</article>';
 }
 
 function contentList(tab, q) {
@@ -2067,6 +2335,17 @@ function viewContent(q) {
       root.addEventListener('click', (e) => {
         const seg = e.target.closest('[data-segv]');
         if (seg) { setQuery({ tab: seg.dataset.segv, loc: null, sort: null, nd: null }); return; }
+        const pdb = e.target.closest('[data-act="pubdate"]');
+        if (pdb) {
+          const it = itemById(pdb.dataset.id);
+          askPublishDate(it, false).then((changed) => {
+            if (changed && it.publishDate) {
+              toast('تاریخ «' + it.title + '» ثبت شد');
+              rerender();
+            }
+          });
+          return;
+        }
         const st = e.target.closest('[data-act="start"]');
         if (st) {
           const it = itemById(st.dataset.id);
@@ -2126,7 +2405,7 @@ function stripHtml(it) {
 }
 
 function dateBtnHtml(kind, date, time) {
-  return '<button type="button" class="input date-btn" data-act="date" data-kind="' + kind + '">' + ic('calendar') + '<span>' + (date ? fmtWhen(date, time) : 'انتخاب تاریخ') + '</span></button>';
+  return '<button type="button" class="input date-btn" data-act="date" data-kind="' + kind + '">' + ic('calendar') + '<span>' + fmtWhenG(date, time) + '</span></button>';
 }
 
 function promptCardHtml(it) {
@@ -2248,13 +2527,20 @@ function snapRowHtml(it, s) {
   const sv = countOf(s, 'saves');
   if (sv != null) bits.push(fmtNum(sv) + ' سیو');
   else if (s.savesPct != null) bits.push('سیو ' + fmtPct(s.savesPct));
-  return '<button type="button" class="row" data-go="#/item/' + it.id + '/stat/' + s.id + '"><span class="ric">' + ic('chart') + '</span><span class="rt"><b>' + esc(checkpointName(s.t, s.label)) + '</b><span>' + (bits.join('، ') || 'بدون عدد') + '</span></span>' + ic('chevL') + '</button>';
+  const tag = s.ig ? badgeHtml('اینستاگرام', '', 'camera') : s.by === 'claude' ? badgeHtml('Claude', '', 'spark') : '';
+  return '<button type="button" class="row" data-go="#/item/' + it.id + '/stat/' + s.id + '"><span class="ric">' + ic('chart') + '</span><span class="rt"><b>' + esc(checkpointName(s.t, s.label)) + tag + '</b><span>' + (bits.join('، ') || 'بدون عدد') + '</span></span>' + ic('chevL') + '</button>';
 }
 
 function statsTabHtml(it) {
   let h = '';
   if (!it.publishDate) {
     h += '<div class="note warn">' + ic('calendar') + '<div><b>زمان انتشار ثبت نشده</b><p>برای یادآور خودکار ثبت آمار و مقایسه‌ی ماهانه لازمه.</p><button type="button" class="btn sm" data-act="date" data-kind="published">ثبت زمان انتشار</button></div></div>';
+  }
+  if (it.igId) {
+    const fd = igFollowerDelta(it, 72);
+    h += '<div class="note small ig-note">' + ic('camera') + '<div><b>آمار این پست خودکار از اینستاگرام میاد</b>' +
+      '<p>فالوور جدید ریلز رو اینستاگرام از این راه نمی‌ده؛ اون رو از Insights دستی وارد کن.' + (fd != null ? ' در ۷۲ ساعت بعد از این پست، فالوورهای کل پیج ' + (fd >= 0 ? fmtNum(fd) + ' تا زیاد شد' : fmtNum(-fd) + ' تا کم شد') + ' (همه‌ی پست‌ها و عوامل با هم).' : '') + '</p>' +
+      (it.permalink ? '<a class="link" href="' + esc(it.permalink) + '" target="_blank" rel="noopener">باز کردن در اینستاگرام</a>' : '') + '</div></div>';
   }
   const due = dueList().find((d) => d.it.id === it.id);
   h += '<button type="button" class="btn primary block" data-go="#/item/' + it.id + '/stat/new' + (due ? '?cp=' + due.c : '') + '">' + ic('plus') + (due ? 'ثبت آمار ' + checkpointName(due.c) : 'ثبت آمار') + '</button>';
@@ -2417,14 +2703,22 @@ async function setStage(it, st) {
   else rerender();
 }
 
+const PUB_TIME_HINT = 'اگه ساعت دقیق رو نمی‌دونی، «نامعلوم» بمونه؛ همون روز کافیه.';
+
+function pubDateOpts(date, time, touched, extra) {
+  return Object.assign({ title: 'زمان انتشار', date, time: touched ? time : null, touched, withTime: true, nowIfToday: true, rememberLast: true, timeHint: PUB_TIME_HINT }, extra || {});
+}
+
 function publishSheet(it) {
   return new Promise((resolve) => {
-    const d = { date: it.publishDate || it.plannedDate || todayISO(), time: it.publishTime || it.plannedTime || nowTime(), pubType: it.pubType || 'normal', dur: it.durationSec };
+    const d = { date: it.publishDate || todayISO(), time: it.publishTime || null, touched: !!it.publishTime, pubType: it.pubType || 'normal', dur: it.durationSec };
+    // اگر ساعت انتخاب نشده و انتشار امروز است، ساعت همین لحظه ثبت می‌شود
+    const eff = () => (d.touched ? d.time : d.date === todayISO() ? nowTime() : null);
     let ok = false;
     openSheet({
       title: 'ثبت انتشار',
-      body: '<p class="sheet-text">زمان دقیق انتشار رو ثبت کن تا یادآور آمار ۲۴ و ۷۲ ساعته و ۷ و ۳۰ روزه سر وقت بیاد.</p>' +
-        fieldHtml('زمان انتشار', '<button type="button" class="input date-btn" data-pd>' + ic('calendar') + '<span>' + fmtWhen(d.date, d.time) + '</span></button>') +
+      body: '<p class="sheet-text">زمان انتشار رو ثبت کن تا یادآور آمار سر وقت بیاد. برای پست‌های قدیمی همون روز کافیه.</p>' +
+        fieldHtml('زمان انتشار', '<button type="button" class="input date-btn" data-pd>' + ic('calendar') + '<span>' + fmtWhenG(d.date, eff()) + '</span></button>') +
         fieldHtml('نوع انتشار', chipsHtml('pubType', idOptions(PUBTYPES), d.pubType, { clearable: false })) +
         fieldHtml('مدت ویدیو (ثانیه)', inputHtml('dur', d.dur, { num: true })) +
         '<div class="sheet-actions"><button type="button" class="btn primary" data-ok>منتشر شد</button><button type="button" class="btn ghost" data-sclose>انصراف</button></div>',
@@ -2432,18 +2726,19 @@ function publishSheet(it) {
         bindForm(b, d);
         b.addEventListener('click', async (e) => {
           if (e.target.closest('[data-pd]')) {
-            const r = await pickDate({ title: 'زمان انتشار', date: d.date, time: d.time, withTime: true });
+            const r = await pickDate(pubDateOpts(d.date, d.time, d.touched));
             if (r) {
               d.date = r.date;
               d.time = r.time;
-              b.querySelector('[data-pd] span').textContent = fmtWhen(d.date, d.time);
+              d.touched = r.touched;
+              b.querySelector('[data-pd] span').textContent = fmtWhenG(d.date, eff());
             }
             return;
           }
           if (e.target.closest('[data-ok]')) {
             it.stage = 'published';
             it.publishDate = d.date;
-            it.publishTime = d.time;
+            it.publishTime = eff();
             it.pubType = d.pubType;
             if (d.dur != null) it.durationSec = d.dur;
             if (it.order == null) it.order = nextOrder();
@@ -2457,23 +2752,25 @@ function publishSheet(it) {
   });
 }
 
+// ثبت یا تغییر تاریخ انتشار؛ اگر چیزی عوض شد true برمی‌گرداند
+async function askPublishDate(it, allowClear) {
+  const r = await pickDate(pubDateOpts(it.publishDate, it.publishTime, !!it.publishTime, { allowClear: !!allowClear, nowIfToday: !it.publishDate }));
+  if (r === undefined) return false;
+  it.publishDate = r ? r.date : null;
+  it.publishTime = r ? r.time : null;
+  touch(it);
+  return true;
+}
+
 async function editItemDate(it, kind) {
-  const planned = kind === 'planned';
-  const r = await pickDate({
-    title: planned ? 'تاریخ برنامه' : 'زمان انتشار',
-    date: planned ? it.plannedDate : it.publishDate,
-    time: planned ? it.plannedTime : it.publishTime,
-    withTime: true,
-    allowClear: true,
-  });
-  if (r === undefined) return;
-  if (planned) {
-    it.plannedDate = r ? r.date : null;
-    it.plannedTime = r ? r.time : null;
-  } else {
-    it.publishDate = r ? r.date : null;
-    it.publishTime = r ? r.time : null;
+  if (kind !== 'planned') {
+    if (await askPublishDate(it, true)) rerender();
+    return;
   }
+  const r = await pickDate({ title: 'تاریخ برنامه', date: it.plannedDate, time: it.plannedTime, withTime: true, allowClear: true, unknownLabel: 'بدون ساعت' });
+  if (r === undefined) return;
+  it.plannedDate = r ? r.date : null;
+  it.plannedTime = r ? r.time : null;
   touch(it);
   rerender();
 }
@@ -2482,6 +2779,7 @@ function itemMenu(it) {
   openSheet({
     title: 'گزینه‌ها',
     body: '<div class="list">' +
+      '<button type="button" class="row" data-m="ask"><span class="ric">' + ic('spark') + '</span><span class="rt"><b>سؤال از Claude درباره‌ی این پست</b><span>تحلیل، هوک، سناریو یا هر چیزی درباره‌ی همین پست</span></span></button>' +
       '<button type="button" class="row" data-m="dup"><span class="ric">' + ic('copy') + '</span><span class="rt"><b>تکثیر</b><span>نسخه‌ی تازه با همین سناریو و کپشن، بدون آمار؛ برای نسخه‌ی دوم ترایل</span></span></button>' +
       '<button type="button" class="row" data-m="arch"><span class="ric">' + ic('archive') + '</span><span class="rt"><b>' + (it.archived ? 'برگرداندن از آرشیو' : 'آرشیو') + '</b><span>' + (it.archived ? 'دوباره توی فهرست‌ها دیده می‌شه' : 'از فهرست‌ها پنهان می‌شه ولی پاک نمی‌شه') + '</span></span></button>' +
       '<button type="button" class="row danger" data-m="del"><span class="ric">' + ic('trash') + '</span><span class="rt"><b>حذف</b><span>همراه همه‌ی آمارهاش</span></span></button></div>',
@@ -2490,10 +2788,14 @@ function itemMenu(it) {
         const r = e.target.closest('[data-m]');
         if (!r) return;
         const m = r.dataset.m;
+        if (m === 'ask') {
+          closeSheet(() => askClaudeSheet({ itemId: it.id }));
+          return;
+        }
         if (m === 'dup') {
           const c = JSON.parse(JSON.stringify(it));
           const now = new Date().toISOString();
-          Object.assign(c, { id: uid('i'), title: it.title + ' (نسخه‌ی دوم)', stage: isPublished(it) ? 'edit' : it.stage, snapshots: [], publishDate: null, publishTime: null, order: null, archived: false, createdAt: now, updatedAt: now });
+          Object.assign(c, { id: uid('i'), title: it.title + ' (نسخه‌ی دوم)', stage: isPublished(it) ? 'edit' : it.stage, snapshots: [], publishDate: null, publishTime: null, order: null, archived: false, igId: null, permalink: null, createdAt: now, updatedAt: now });
           S.items.push(c);
           save();
           closeSheet(() => { toast('نسخه‌ی تازه ساخته شد'); go('#/item/' + c.id); });
@@ -2506,6 +2808,7 @@ function itemMenu(it) {
             const ok = await confirmBox({ title: 'حذف «' + it.title + '»؟', text: 'این پست و آمارهاش پاک می‌شن. دایرکت‌ها و درس‌های مرتبط می‌مونن ولی دیگه به این پست وصل نیستن.', ok: 'حذف کن', danger: true });
             if (!ok) return;
             S.items = S.items.filter((x) => x !== it);
+            markDeleted(it.id);
             S.leads.forEach((l) => { if (l.itemId === it.id) l.itemId = null; });
             S.learnings.forEach((l) => { l.itemIds = l.itemIds.filter((x) => x !== it.id); });
             S.snippets.forEach((s) => { if (s.itemId === it.id) s.itemId = null; });
@@ -2556,6 +2859,10 @@ function updateAlt(root, f) {
     const el = root.querySelector('[data-alt="' + k + '"]');
     if (el) el.textContent = altText(f, k);
   });
+}
+
+function customHint(h) {
+  return h != null && h >= 48 ? 'یعنی حدود ' + fmtHours(h) + ' بعد از انتشار' : '';
 }
 
 function guessMode(d) {
@@ -2609,7 +2916,7 @@ function viewStatForm(itemId, sid, q) {
     '<span class="muted small">' + (it.publishDate ? 'منتشرشده ' + fmtWhen(it.publishDate, it.publishTime) + (h != null && h >= 0 ? '؛ ' + fmtHours(h) + ' پیش' : '') : 'زمان انتشار ثبت نشده') + '</span></div>' +
     fieldHtml('مقطع', '<div class="chips" data-cps>' + cpChips + '</div>') +
     '<div class="custom-cp" data-custom' + (f.custom ? '' : ' hidden') + '><div class="grid2">' +
-    fieldHtml('ساعت از انتشار', inputHtml('customH', f.customH, { num: true, ph: 'مثلاً ۳۶' })) +
+    fieldHtml('ساعت از انتشار', inputHtml('customH', f.customH, { num: true, ph: 'مثلاً ۳۶' }), '<span data-customhint>' + customHint(f.customH) + '</span>') +
     fieldHtml('برچسب (اختیاری)', inputHtml('s.label', d.label, { ph: 'مثلاً بعد از انتخاب رشته' })) + '</div></div>' +
     '<h3 class="sub-h">پایه</h3><div class="grid2">' +
     numField('ویو', 's.views', d.views) +
@@ -2640,6 +2947,7 @@ function viewStatForm(itemId, sid, q) {
     html,
     mount: (root) => {
       bindForm(root, f, (path) => {
+        if (path === 'customH') root.querySelector('[data-customhint]').textContent = customHint(f.customH);
         if (path.indexOf('s.src.') === 0) root.querySelector('[data-srcsum]').textContent = srcSumHtml(d);
         else updateAlt(root, f);
         root.querySelector('[data-preview]').innerHTML = previewHtml(it, f);
@@ -2898,6 +3206,7 @@ function viewAnalysis(q) {
         '<div class="insight">' + ic('spark') + '<div><p>' + esc(insightText(x, mid)) + '</p><button type="button" class="link" data-hyp="' + i + '">ثبت به‌عنوان فرضیه</button></div></div>').join('') +
         (vals.length < 12 ? '<p class="muted small">تعداد پست‌ها هنوز کمه. این‌ها رو فرضیه بدون و با ترایل امتحانشون کن.</p>' : '') + '</div></section>';
     }
+    h += '<button type="button" class="row card-row" data-askai><span class="ric gold">' + ic('spark') + '</span><span class="rt"><b>تحلیل عمیق‌تر از Claude</b><span>درباره‌ی «' + esc(m.name) + '» بر اساس «' + esc(DIMS[dim].name) + '» بپرس</span></span>' + ic('chevL') + '</button>';
 
     ranked = vals.slice().sort((a, b) => m.better * (b.v - a.v));
     h += '<section class="sec">' + secHead('رتبه‌بندی', '<span class="muted small">' + (m.better > 0 ? 'از بیشترین' : 'از کمترین') + '</span>') + '<div class="list rank">' +
@@ -2923,6 +3232,10 @@ function viewAnalysis(q) {
         if (seg) { setQuery({ b: seg.dataset.segv }); return; }
         const dd = e.target.closest('[data-d]');
         if (dd) { setQuery({ d: dd.dataset.d }); return; }
+        if (e.target.closest('[data-askai]')) {
+          askClaudeSheet({ text: 'درباره‌ی «' + m.name + '» (' + (basis === 'latest' ? 'آخرین ثبت' : checkpointName(Number(basis))) + ') و مقایسه بر اساس «' + DIMS[dim].name + '»: چه الگویی می‌بینی، چقدر قابل اتکاست و برای بالا بردنش چی بسازم؟' });
+          return;
+        }
         const hy = e.target.closest('[data-hyp]');
         if (hy) {
           const x = ins[+hy.dataset.hyp];
@@ -3094,6 +3407,7 @@ function leadSheet(preset, existing) {
         }
         if (e.target.closest('[data-del]')) {
           S.leads = S.leads.filter((x) => x.id !== existing.id);
+          markDeleted(existing.id);
           invalidateLeads();
           save();
           closeSheet(() => { toast('حذف شد'); rerender(); });
@@ -3176,6 +3490,7 @@ function learningSheet(preset, existing) {
         }
         if (e.target.closest('[data-del]')) {
           S.learnings = S.learnings.filter((x) => x.id !== existing.id);
+          markDeleted(existing.id);
           save();
           closeSheet(() => { toast('حذف شد'); rerender(); });
         }
@@ -3277,6 +3592,7 @@ function snippetSheet(preset, existing) {
         }
         if (e.target.closest('[data-del]')) {
           S.snippets = S.snippets.filter((x) => x.id !== existing.id);
+          markDeleted(existing.id);
           save();
           closeSheet(() => { toast('حذف شد'); rerender(); });
         }
@@ -3287,17 +3603,21 @@ function snippetSheet(preset, existing) {
 
 /* ---------- بیشتر، پشتیبان‌گیری، راهنما ---------- */
 function viewMore() {
-  const d = daysSinceBackup();
+  const unread = unreadInbox();
+  const igText = IG && IG.fetchedAt ? 'آخرین دریافت: ' + fmtAgoDays(Math.floor((Date.now() - new Date(IG.fetchedAt).getTime()) / DAY_MS)) : 'دریافت خودکار آمار پست‌ها';
   const rows = [
+    ['#/claude', 'spark', 'تحلیل‌های Claude', unread ? faNum(unread) + ' تحلیل تازه' : 'سؤال بپرس و پیشنهادها رو اعمال کن', unread],
+    ['#/ig', 'camera', 'اینستاگرام', igText],
     ['#/funnel', 'funnel', 'قیف بیمار', 'دایرکت‌ها و نوبت‌هایی که از پست‌ها اومدن'],
     ['#/learnings', 'book', 'دفترچه‌ی درس‌ها', faNum(S.learnings.length) + ' درس و فرضیه'],
     ['#/snippets', 'quote', 'بانک هوک و CTA', faNum(S.snippets.length) + ' مورد'],
-    ['#/backup', 'shield', 'پشتیبان‌گیری و بازگردانی', 'آخرین پشتیبان: ' + fmtAgoDays(d)],
+    ['#/backup', 'cloud', 'پشتیبان و همگام‌سازی', SYNC ? 'پشتیبان خودکار: ' + syncWhenText() : 'پشتیبان خودکار خاموشه'],
     ['#/settings', 'sliders', 'تنظیمات', 'سری‌ها، فهرست‌ها، چک‌لیست و پرامپت‌ها'],
     ['#/help', 'info', 'راهنما', 'روال پیشنهادی و معنی شاخص‌ها'],
   ];
   const html = '<div class="list">' + rows.map((r) =>
-    '<button type="button" class="row" data-go="' + r[0] + '"><span class="ric">' + ic(r[1]) + '</span><span class="rt"><b>' + r[2] + '</b><span>' + r[3] + '</span></span>' + ic('chevL') + '</button>').join('') + '</div>' +
+    '<button type="button" class="row" data-go="' + r[0] + '"><span class="ric">' + ic(r[1]) + '</span><span class="rt"><b>' + r[2] + '</b><span>' + esc(r[3]) + '</span></span>' +
+    (r[4] ? '<span class="cnt-badge">' + faNum(r[4]) + '</span>' : '') + ic('chevL') + '</button>').join('') + '</div>' +
     '<p class="center muted small mt16">استودیو محتوا، نسخه‌ی ' + faNum(APP_VERSION) + '</p>';
   return { title: 'بیشتر', tab: 'more', html };
 }
@@ -3335,6 +3655,15 @@ function pickImportFile() {
     if (!file) return;
     try {
       const text = await file.text();
+      let kind = null;
+      try { kind = JSON.parse(text).kind; } catch (e) { kind = null; }
+      if (kind === 'studio-inbox') {
+        const key = importInboxText(text, file.name);
+        if (!key) throw new Error('این فایل تحلیل قابل خواندن نیست.');
+        toast('تحلیل Claude وارد شد');
+        go('#/claude/' + encodeURIComponent(key));
+        return;
+      }
       importSheet(parseBackup(text));
     } catch (err) {
       toast(err.message || 'فایل خوانده نشد');
@@ -3350,7 +3679,7 @@ function importSheet(data) {
   openSheet({
     title: 'وارد کردن فایل',
     body: '<p class="sheet-text">این فایل شامل ' + faNum(n('items')) + ' پست و ایده، ' + faNum(snaps) + ' ثبت آمار، ' + faNum(n('learnings')) + ' درس، ' + faNum(n('snippets')) + ' هوک و CTA و ' + faNum(n('leads')) + ' دایرکت و نوبته.</p>' +
-      (empty ? '' : '<p class="sheet-text muted">«ادغام» موارد تازه رو اضافه می‌کنه و هر موردی که توی فایل جدیدتره رو به‌روز می‌کنه. «جایگزینی» همه‌ی داده‌های فعلی رو با فایل عوض می‌کنه. در هر دو حالت، یک نسخه از وضعیت فعلی نگه داشته می‌شه که از صفحه‌ی پشتیبان قابل برگشته.</p>') +
+      (empty ? '' : '<p class="sheet-text muted">«ادغام» موارد تازه رو اضافه می‌کنه و هر موردی که توی فایل جدیدتره رو به‌روز می‌کنه. «جایگزینی» همه‌ی داده‌های فعلی رو با فایل عوض می‌کنه' + (SYNC ? '، نسخه‌ی گیت‌هاب هم همین‌طور (نسخه‌های قبلی توی تاریخچه می‌مونن)' : '') + '. در هر دو حالت، یک نسخه از وضعیت فعلی نگه داشته می‌شه که از صفحه‌ی پشتیبان قابل برگشته.</p>') +
       '<div class="sheet-actions">' + (empty ? '<button type="button" class="btn primary" data-replace>وارد کن</button>'
         : '<button type="button" class="btn primary" data-merge>ادغام</button><button type="button" class="btn danger" data-replace>جایگزینی کامل</button>') + '</div>',
     onMount: (b) => {
@@ -3374,26 +3703,149 @@ function importSheet(data) {
   });
 }
 
+const REPO_NEW_URL = 'https://github.com/new?name=studio-data&visibility=private&description=' + encodeURIComponent('داده‌های استودیو محتوا (خصوصی)');
+const TOKEN_NEW_URL = 'https://github.com/settings/personal-access-tokens/new?name=studio-app&description=' + encodeURIComponent('استودیو محتوا: پشتیبان خودکار و اینستاگرام') + '&expires_in=none&contents=write&actions=write&secrets=write';
+
+function inAppBrowserName() {
+  const ua = navigator.userAgent || '';
+  if (/Telegram/i.test(ua)) return 'تلگرام';
+  if (/Instagram/i.test(ua)) return 'اینستاگرام';
+  if (/FBAN|FBAV|FB_IAB/i.test(ua)) return 'فیسبوک';
+  if (/WhatsApp/i.test(ua)) return 'واتس‌اپ';
+  if (/; wv\)/.test(ua)) return 'یک برنامه‌ی دیگه';
+  return null;
+}
+
+function contextWarnHtml() {
+  const n = inAppBrowserName();
+  if (!n) return '';
+  return '<div class="note danger">' + ic('alert') + '<div><b>این صفحه داخل مرورگر ' + esc(n) + ' باز شده</b><p>داده‌هایی که اینجا ثبت کنی جدا از اپ نصب‌شده‌ان و ممکنه پاک بشن. لینک رو توی کروم باز کن یا از آیکون اپ استفاده کن.</p></div></div>';
+}
+
+function syncCardHtml() {
+  if (!SYNC) {
+    return '<div class="card sync-card off"><div class="card-h"><b>' + ic('cloud') + 'پشتیبان خودکار خاموشه</b></div>' +
+      '<p class="muted small">با روشن کردنش، داده‌ها بعد از هر تغییر توی یک ریپوی خصوصی گیت‌هاب ذخیره می‌شن و تاریخچه‌ی همه‌ی نسخه‌ها هم می‌مونه. اگه اپ پاک یا ریست بشه، با کد بازیابی همه‌چیز برمی‌گرده. Claude هم از همین‌جا داده‌ها رو می‌خونه و تحلیل‌هاش رو برمی‌گردونه.</p>' +
+      '<button type="button" class="btn primary mt8" data-connect>روشن کردن پشتیبان خودکار</button></div>';
+  }
+  const err = SYNC.lastError;
+  return '<div class="card sync-card ' + (err ? 'err' : 'on') + '"><div class="card-h"><b>' + ic(err ? 'alert' : 'cloud') + (err ? 'پشتیبان خودکار خطا داد' : 'پشتیبان خودکار روشنه') + '</b>' +
+    '<span class="muted small" dir="ltr">' + esc(SYNC.owner + '/' + SYNC.repo) + '</span></div>' +
+    '<p class="small' + (err ? ' warn-t' : ' muted') + '">' + esc(err || 'آخرین همگام‌سازی: ' + syncWhenText()) + '</p>' +
+    '<div class="btn-row"><button type="button" class="btn sm primary" data-syncnow>' + ic('refresh') + 'الان همگام کن</button>' +
+    '<button type="button" class="btn sm" data-go="#/sync/history">' + ic('clock') + 'تاریخچه‌ی نسخه‌ها</button>' +
+    '<button type="button" class="btn sm" data-recovery>' + ic('shield') + 'کد بازیابی</button>' +
+    (err && /توکن/.test(err) ? '<button type="button" class="btn sm" data-connect>توکن تازه</button>' : '') + '</div></div>';
+}
+
+function connectSheet(opts) {
+  opts = opts || {};
+  const d = { input: '', repo: SYNC ? SYNC.repo : DATA_REPO_DEFAULT };
+  openSheet({
+    title: opts.restore ? 'بازگردانی از گیت‌هاب' : 'روشن کردن پشتیبان خودکار',
+    tall: true,
+    body: (opts.restore
+      ? '<p class="sheet-text">کد بازیابی‌ای که توی تلگرام نگه داشتی رو اینجا بچسبون تا همه‌ی داده‌ها از گیت‌هاب برگردن.</p>'
+      : '<p class="sheet-text">یک بار انجام می‌شه. اگه قبلاً ریپو یا توکن رو ساختی، اون قدم رو رد کن.</p><ol class="setup">' +
+        igSetupStep(1, 'ساخت ریپوی خصوصی studio-data', '<p>صفحه‌ای که باز می‌شه، مطمئن شو <b>Private</b> انتخاب شده و «Create repository» رو بزن.</p><a class="btn sm" href="' + esc(REPO_NEW_URL) + '" target="_blank" rel="noopener">ساخت ریپو</a>') +
+        igSetupStep(2, 'ساخت توکن دسترسی', '<p>دسترسی‌ها از قبل انتخاب شده‌ان. فقط توی «Repository access» گزینه‌ی <b>Only select repositories</b> رو بزن و <b>studio-data</b> رو انتخاب کن؛ بعد پایین صفحه «Generate token» و توکن رو کپی کن.</p><a class="btn sm" href="' + esc(TOKEN_NEW_URL) + '" target="_blank" rel="noopener">ساخت توکن</a>') +
+        igSetupStep(3, 'توکن رو اینجا بچسبون', '') + '</ol>') +
+      fieldHtml(opts.restore ? 'کد بازیابی یا توکن' : 'توکن یا کد بازیابی', taHtml('input', '', { rows: 3, ph: 'github_pat_… یا studio1.…', attrs: ' dir="ltr" autocomplete="off" autocapitalize="off" spellcheck="false"' })) +
+      '<details class="more-fields"><summary>اسم ریپو فرق داره؟</summary>' + fieldHtml('اسم ریپو', inputHtml('repo', d.repo, { attrs: ' dir="ltr" autocapitalize="off"' })) + '</details>' +
+      '<p class="sync-err" data-err hidden></p>' +
+      '<div class="sheet-actions"><button type="button" class="btn primary" data-go-connect>' + (opts.restore ? 'بازگردانی' : 'اتصال') + '</button><button type="button" class="btn ghost" data-sclose>انصراف</button></div>',
+    onMount: (b) => {
+      bindForm(b, d);
+      const btn = b.querySelector('[data-go-connect]');
+      const errEl = b.querySelector('[data-err]');
+      btn.addEventListener('click', async () => {
+        errEl.hidden = true;
+        if (!parseConnectInput(d.input)) {
+          errEl.textContent = 'این متن نه توکن گیت‌هابه نه کد بازیابی. توکن با github_pat_ شروع می‌شه و کد بازیابی با studio1.';
+          errEl.hidden = false;
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = 'در حال اتصال…';
+        try {
+          const before = S.items.length;
+          await connectSync(d.input, (d.repo || '').trim() || DATA_REPO_DEFAULT);
+          const restored = S.items.length - before;
+          closeSheet(() => {
+            toast(restored > 0 ? faNum(restored) + ' مورد از گیت‌هاب برگشت' : 'پشتیبان خودکار روشن شد');
+            rerender();
+            if (!parseConnectInput(d.input).owner) recoverySheet(true);
+          });
+        } catch (e) {
+          await disconnectSync();
+          errEl.textContent = e.code === 'bad-input' ? 'متن واردشده درست نیست.' : syncErrorText(e);
+          errEl.hidden = false;
+          btn.disabled = false;
+          btn.textContent = opts.restore ? 'بازگردانی' : 'اتصال';
+        }
+      });
+    },
+  });
+}
+
+function recoverySheet(first) {
+  const code = recoveryCode();
+  openSheet({
+    title: 'کد بازیابی',
+    body: (first ? '<p class="sheet-text"><b>پشتیبان خودکار روشن شد.</b> این کد رو همین الان توی Saved Messages تلگرام نگه دار.</p>' : '') +
+      '<p class="sheet-text">اگه اپ پاک یا ریست بشه، یا گوشی رو عوض کنی، با این کد همه‌ی داده‌ها برمی‌گردن. کد شامل توکن دسترسیه؛ برای کس دیگه‌ای نفرستش.</p>' +
+      '<div class="code-box" dir="ltr">' + esc(code) + '</div>' +
+      '<div class="sheet-actions"><button type="button" class="btn primary" data-share>' + ic('share') + 'فرستادن به تلگرام</button><button type="button" class="btn" data-copy>' + ic('copy') + 'کپی</button></div>',
+    onMount: (b) => {
+      b.addEventListener('click', async (e) => {
+        if (e.target.closest('[data-copy]')) { copyText(code, 'کد بازیابی کپی شد'); return; }
+        if (e.target.closest('[data-share]')) {
+          if (navigator.share) {
+            try { await navigator.share({ text: 'کد بازیابی استودیو محتوا:\n' + code }); } catch (err) { /* ignore */ }
+          } else copyText(code, 'کد بازیابی کپی شد');
+        }
+      });
+    },
+  });
+}
+
 function viewBackup() {
-  const d = daysSinceBackup();
   const snaps = S.items.reduce((a, it) => a + it.snapshots.length, 0);
-  const html =
-    '<div class="card"><div class="card-h"><b>داده‌ها فقط روی همین گوشی‌ان</b></div><p class="muted small">هیچ‌چیز روی گیت‌هاب یا جای دیگه‌ای ذخیره نمی‌شه. اگه اپ پاک بشه، داده‌های مرورگر پاک بشه یا گوشی عوض بشه، فقط با فایل پشتیبان برمی‌گردن.</p>' +
-    '<div class="kpis three mt8"><div class="kpi"><div class="kl">پست و ایده</div><div class="kv">' + fmtNum(S.items.length) + '</div></div><div class="kpi"><div class="kl">ثبت آمار</div><div class="kv">' + fmtNum(snaps) + '</div></div><div class="kpi"><div class="kl">آخرین پشتیبان</div><div class="kv small-v">' + fmtAgoDays(d) + '</div></div></div></div>' +
-    '<section class="sec">' + secHead('گرفتن پشتیبان') + '<div class="list">' +
-    '<button type="button" class="row" data-share><span class="ric">' + ic('share') + '</span><span class="rt"><b>فرستادن به تلگرام یا درایو</b><span>پیشنهادی؛ هفته‌ای یک بار</span></span></button>' +
+  const html = contextWarnHtml() + syncCardHtml() +
+    '<div class="kpis three mt12"><div class="kpi"><div class="kl">پست و ایده</div><div class="kv">' + fmtNum(S.items.length) + '</div></div><div class="kpi"><div class="kl">ثبت آمار</div><div class="kv">' + fmtNum(snaps) + '</div></div><div class="kpi"><div class="kl">آخرین پشتیبان</div><div class="kv small-v">' + fmtAgoDays(daysSinceBackup()) + '</div></div></div>' +
+    '<section class="sec">' + secHead('پشتیبان به‌صورت فایل') + '<div class="list">' +
+    '<button type="button" class="row" data-share><span class="ric">' + ic('share') + '</span><span class="rt"><b>فرستادن به تلگرام یا درایو</b><span>یک نسخه‌ی جدا از گیت‌هاب</span></span></button>' +
     '<button type="button" class="row" data-dl><span class="ric">' + ic('download') + '</span><span class="rt"><b>ذخیره توی گوشی</b><span>پوشه‌ی دانلودها</span></span></button></div></section>' +
     '<section class="sec">' + secHead('بازگردانی') + '<div class="list">' +
-    '<button type="button" class="row" data-imp><span class="ric">' + ic('upload') + '</span><span class="rt"><b>وارد کردن از فایل</b><span>فایل پشتیبان یا فایل اطلاعات اولیه</span></span></button>' +
-    '<button type="button" class="row" data-prev hidden><span class="ric">' + ic('refresh') + '</span><span class="rt"><b>برگرداندن نسخه‌ی قبلی</b><span>وضعیت قبل از آخرین واردکردن یا پاک کردن</span></span></button></div></section>' +
-    '<section class="sec">' + secHead('ذخیره‌سازی دائمی') + '<p class="muted small card" data-persist>در حال بررسی…</p></section>';
+    (SYNC ? '' : '<button type="button" class="row" data-restore><span class="ric">' + ic('cloud') + '</span><span class="rt"><b>بازگردانی از گیت‌هاب</b><span>با کد بازیابی</span></span></button>') +
+    '<button type="button" class="row" data-imp><span class="ric">' + ic('upload') + '</span><span class="rt"><b>وارد کردن از فایل</b><span>فایل پشتیبان، فایل اطلاعات اولیه یا فایل تحلیل Claude</span></span></button>' +
+    '<button type="button" class="row" data-prev hidden><span class="ric">' + ic('refresh') + '</span><span class="rt"><b>برگرداندن نسخه‌ی قبلی</b><span>وضعیت قبل از آخرین واردکردن، اعمال یا پاک کردن</span></span></button></div></section>' +
+    '<section class="sec">' + secHead('حافظه‌ی گوشی') + '<p class="muted small card" data-persist>در حال بررسی…</p></section>' +
+    (SYNC ? '<div class="center mt16"><button type="button" class="link danger-t" data-disconnect>قطع پشتیبان خودکار روی این گوشی</button></div>' : '');
   return {
-    title: 'پشتیبان‌گیری',
+    title: 'پشتیبان و همگام‌سازی',
     back: '/more',
     tab: 'more',
     html,
     mount: async (root) => {
       root.addEventListener('click', async (e) => {
+        if (e.target.closest('[data-connect]')) { connectSheet(); return; }
+        if (e.target.closest('[data-restore]')) { connectSheet({ restore: true }); return; }
+        if (e.target.closest('[data-recovery]')) { recoverySheet(false); return; }
+        if (e.target.closest('[data-syncnow]')) {
+          toast('در حال همگام‌سازی…');
+          const ok = await syncNow({ extras: true, rerender: true });
+          toast(ok ? 'همگام شد' : SYNC.lastError || 'همگام نشد');
+          rerender();
+          return;
+        }
+        if (e.target.closest('[data-disconnect]')) {
+          const ok = await confirmBox({ title: 'پشتیبان خودکار قطع بشه؟', text: 'داده‌های روی گیت‌هاب سر جاشون می‌مونن؛ فقط این گوشی دیگه چیزی نمی‌فرسته. با کد بازیابی دوباره وصل می‌شه.', ok: 'قطع کن', danger: true });
+          if (!ok) return;
+          await disconnectSync();
+          rerender();
+          return;
+        }
         if (e.target.closest('[data-share]')) {
           const r = await shareBackup();
           if (r !== 'aborted') { markBackedUp(); toast(r === 'shared' ? 'پشتیبان فرستاده شد' : 'فایل پشتیبان ذخیره شد'); rerender(); }
@@ -3402,7 +3854,7 @@ function viewBackup() {
         if (e.target.closest('[data-dl]')) { saveBackupFile(); markBackedUp(); toast('فایل پشتیبان ذخیره شد'); rerender(); return; }
         if (e.target.closest('[data-imp]')) { pickImportFile(); return; }
         if (e.target.closest('[data-prev]')) {
-          const ok = await confirmBox({ title: 'برگرداندن نسخه‌ی قبلی؟', text: 'داده‌های فعلی با نسخه‌ی قبل از آخرین واردکردن یا پاک کردن عوض می‌شن. وضعیت فعلی هم نگه داشته می‌شه.', ok: 'برگردون' });
+          const ok = await confirmBox({ title: 'برگرداندن نسخه‌ی قبلی؟', text: 'داده‌های فعلی با نسخه‌ی قبل از آخرین واردکردن، اعمال گروهی یا پاک کردن عوض می‌شن. وضعیت فعلی هم نگه داشته می‌شه.', ok: 'برگردون' });
           if (!ok) return;
           if (await restorePrev()) { invalidateLeads(); applyTheme(); toast('نسخه‌ی قبلی برگشت'); rerender(); }
         }
@@ -3411,8 +3863,50 @@ function viewBackup() {
       const el = root.querySelector('[data-persist]');
       try {
         const p = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : null;
-        if (el) el.textContent = p ? 'فعاله: مرورگر داده‌های اپ رو خودسرانه پاک نمی‌کنه. باز هم پشتیبان بگیر.' : 'هنوز فعال نشده. با نصب اپ روی صفحه‌ی اصلی معمولاً خودکار فعال می‌شه؛ تا اون موقع پشتیبان مهم‌تره.';
+        const base = p ? 'ذخیره‌سازی دائمی فعاله: مرورگر داده‌های اپ رو خودسرانه پاک نمی‌کنه.' : 'ذخیره‌سازی دائمی هنوز فعال نشده؛ اگه حافظه‌ی گوشی پر بشه، مرورگر ممکنه داده‌ها رو پاک کنه.';
+        const tail = _storageWarn ? ' حافظه‌ی اصلی مرورگر (IndexedDB) باز نشد و داده‌ها جای دیگه‌ای نگه داشته می‌شن.' : '';
+        if (el) el.textContent = base + tail + (SYNC ? ' نسخه‌ی اصلی روی گیت‌هاب امنه.' : ' پشتیبان خودکار رو روشن کن.');
       } catch (err) { if (el) el.textContent = 'قابل بررسی نیست.'; }
+    },
+  };
+}
+
+function viewSyncHistory() {
+  if (!SYNC) return notFoundView('پشتیبان خودکار وصل نیست.');
+  return {
+    title: 'تاریخچه‌ی نسخه‌ها',
+    back: '/backup',
+    tab: 'more',
+    html: '<p class="muted small">هر ذخیره‌ی خودکار یک نسخه‌ست. روی یک نسخه بزن تا ببینی چی داخلشه و اگه خواستی برش گردونی.</p><div class="list" data-hist><p class="pad muted small">در حال گرفتن از گیت‌هاب…</p></div>',
+    mount: async (root) => {
+      const box = root.querySelector('[data-hist]');
+      let list = [];
+      try {
+        list = await ghHistory();
+      } catch (e) {
+        box.innerHTML = '<p class="pad warn-t small">' + esc(syncErrorText(e)) + '</p>';
+        return;
+      }
+      if (!list.length) { box.innerHTML = '<p class="pad muted small">هنوز نسخه‌ای نیست.</p>'; return; }
+      box.innerHTML = list.map((c, i) => {
+        const d = c.date ? new Date(c.date) : null;
+        return '<button type="button" class="row" data-ver="' + i + '"><span class="ric">' + ic('clock') + '</span><span class="rt"><b>' + (d ? esc(fmtWhen(dateToISO(d), pad2(d.getHours()) + ':' + pad2(d.getMinutes()))) : '') + (i === 0 ? ' (آخرین)' : '') + '</b><span>' + esc(String(c.msg || '').split('\n')[0]) + '</span></span>' + ic('chevL') + '</button>';
+      }).join('');
+      box.addEventListener('click', async (e) => {
+        const r = e.target.closest('[data-ver]');
+        if (!r) return;
+        const c = list[+r.dataset.ver];
+        toast('در حال گرفتن نسخه…');
+        let data;
+        try {
+          const f = await ghRead('state.json', c.sha);
+          data = parseBackup(f.text);
+        } catch (err) {
+          toast(err.message || syncErrorText(err));
+          return;
+        }
+        importSheet(data);
+      });
     },
   };
 }
@@ -3748,6 +4242,1541 @@ function viewPromptSettings() {
   };
 }
 
+/* ---------- پشتیبان خودکار و همگام‌سازی با ریپوی خصوصی گیت‌هاب ---------- */
+const GH_API = 'https://api.github.com';
+const DATA_REPO_DEFAULT = 'studio-data';
+const LS_SYNC = IDB_NAME + ':sync';
+const SYNC_DELAY = 15000;
+const EXTRAS_EVERY = 10 * 60000;
+
+let SYNC = null; // {owner, repo, token, branch, lastSha, lastHash, lastPushAt, lastPullAt, lastExtrasAt, lastError, lastErrorAt, lastForceAt, igSha, igStatusSha, connectedAt}
+let _syncState = 'off'; // off | idle | syncing | ok | error | offline
+let _syncTimer = null;
+let _syncBusy = false;
+let _syncAgain = false;
+
+async function loadSyncCfg() {
+  let c = null;
+  try { c = await kvGet('sync'); } catch (e) { /* ignore */ }
+  if (!c) {
+    try {
+      const v = localStorage.getItem(LS_SYNC);
+      if (v) c = JSON.parse(v);
+    } catch (e) { /* ignore */ }
+  }
+  SYNC = c && c.token && c.owner && c.repo ? c : null;
+  _syncState = SYNC ? (SYNC.lastError ? 'error' : 'idle') : 'off';
+}
+
+async function saveSyncCfg() {
+  try {
+    if (SYNC) await kvSet('sync', SYNC);
+    else if (_db) await idbRun('readwrite', (st) => st.delete('sync'));
+  } catch (e) { /* ignore */ }
+  try {
+    if (SYNC) localStorage.setItem(LS_SYNC, JSON.stringify(SYNC));
+    else localStorage.removeItem(LS_SYNC);
+  } catch (e) { /* ignore */ }
+}
+
+function setSyncState(st) {
+  _syncState = st;
+  const el = document.querySelector('[data-syncdot]');
+  if (el) el.dataset.state = st;
+}
+
+/* ---------- ارتباط با API گیت‌هاب ---------- */
+function utf8ToB64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+function b64ToUtf8(b64) {
+  const bin = atob(String(b64).replace(/\s/g, ''));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+function ghError(msg, code, status) {
+  const e = new Error(msg);
+  e.code = code;
+  e.status = status;
+  return e;
+}
+
+async function gh(method, path, body, opts) {
+  opts = opts || {};
+  const headers = { Accept: opts.accept || 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  const token = opts.token || (SYNC && SYNC.token);
+  if (token) headers.Authorization = 'Bearer ' + token;
+  if (body) headers['Content-Type'] = 'application/json';
+  let res;
+  try {
+    res = await fetch(GH_API + path, { method, headers, body: body ? JSON.stringify(body) : undefined, cache: 'no-store' });
+  } catch (e) {
+    throw ghError('network', 'network');
+  }
+  if (res.status === 204) return null;
+  const text = await res.text();
+  if (opts.raw && res.ok) return text;
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+  if (!res.ok) throw ghError((data && data.message) || 'HTTP ' + res.status, 'http', res.status);
+  return data;
+}
+
+function repoPath(p) {
+  return '/repos/' + encodeURIComponent(SYNC.owner) + '/' + encodeURIComponent(SYNC.repo) + (p || '');
+}
+
+function encPath(p) {
+  return p.split('/').map(encodeURIComponent).join('/');
+}
+
+async function ghStat(path) {
+  try {
+    const d = await gh('GET', repoPath('/contents/' + encPath(path)));
+    return Array.isArray(d) ? null : d;
+  } catch (e) {
+    if (e.status === 404) return null;
+    throw e;
+  }
+}
+
+async function ghRead(path, ref) {
+  const q = ref ? '?ref=' + encodeURIComponent(ref) : '';
+  let d;
+  try {
+    d = await gh('GET', repoPath('/contents/' + encPath(path) + q));
+  } catch (e) {
+    if (e.status === 404) return null;
+    throw e;
+  }
+  if (!d || Array.isArray(d)) return null;
+  let text;
+  if (d.encoding === 'base64' && d.content) text = b64ToUtf8(d.content);
+  else text = await gh('GET', repoPath('/contents/' + encPath(path) + q), null, { accept: 'application/vnd.github.raw+json', raw: true });
+  return { sha: d.sha, text };
+}
+
+async function ghWrite(path, text, sha, message) {
+  const body = { message, content: utf8ToB64(text) };
+  if (sha) body.sha = sha;
+  const d = await gh('PUT', repoPath('/contents/' + encPath(path)), body);
+  return d && d.content ? d.content.sha : null;
+}
+
+async function ghList(dir) {
+  try {
+    const d = await gh('GET', repoPath('/contents/' + encPath(dir)));
+    return Array.isArray(d) ? d : [];
+  } catch (e) {
+    if (e.status === 404) return [];
+    throw e;
+  }
+}
+
+function syncErrorText(e) {
+  if (!e) return 'خطای نامشخص';
+  if (e.code === 'network') return 'به گیت‌هاب وصل نشد؛ اینترنت رو چک کن.';
+  if (e.code === 'public') return 'این ریپو عمومیه؛ برای داده‌ها باید Private باشه.';
+  if (e.code === 'noperm') return 'توکن اجازه‌ی نوشتن توی این ریپو رو نداره.';
+  if (e.status === 401) return 'توکن نامعتبره یا منقضی شده؛ یک توکن تازه بساز.';
+  if (e.status === 403) return 'گیت‌هاب اجازه نداد؛ دسترسی‌های توکن رو چک کن.';
+  if (e.status === 404) return 'ریپو پیدا نشد، یا توکن به این ریپو دسترسی نداره.';
+  if (e.status === 409 || e.status === 422) return 'تداخل نسخه‌ها؛ دوباره امتحان می‌شه.';
+  return 'خطای گیت‌هاب: ' + (e.message || e.status);
+}
+
+/* ---------- چرخه‌ی همگام‌سازی ---------- */
+function remotePayload() {
+  return JSON.stringify({ app: APP_ID, kind: 'backup', version: 1, appVersion: APP_VERSION, exportedAt: new Date().toISOString(), data: S }, null, 1);
+}
+
+function commitMsg(prefix) {
+  const snaps = S.items.reduce((a, it) => a + it.snapshots.length, 0);
+  return (prefix || 'پشتیبان خودکار') + ': ' + S.items.length + ' پست و ایده، ' + snaps + ' ثبت آمار (نسخه‌ی اپ ' + APP_VERSION + ')';
+}
+
+function onStateSaved() {
+  if (SYNC) scheduleSync(SYNC_DELAY);
+}
+
+function scheduleSync(ms) {
+  if (!SYNC) return;
+  clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(() => { syncNow(); }, ms);
+}
+
+// اگر کاربر در حال تایپ است صفحه را دوباره نمی‌سازد
+function safeRerender() {
+  const a = document.activeElement;
+  if (_sheets.length) return;
+  if (a && a.matches && a.matches('input, textarea, select') && document.getElementById('main').contains(a)) return;
+  rerender();
+}
+
+async function syncNow(opts) {
+  opts = opts || {};
+  if (!SYNC) return false;
+  if (_syncBusy) {
+    _syncAgain = true;
+    return false;
+  }
+  if (navigator.onLine === false) {
+    setSyncState('offline');
+    return false;
+  }
+  clearTimeout(_syncTimer);
+  _syncBusy = true;
+  setSyncState('syncing');
+  let ok = false;
+  let changed = false;
+  try {
+    await flushSave();
+    // اول تحلیل‌ها و آمار اینستاگرام، بعد ادغام و ارسال؛ این‌طوری همه در یک دور به گیت‌هاب می‌رسد
+    if (opts.extras || Date.now() - (SYNC.lastExtrasAt || 0) > EXTRAS_EVERY) changed = await syncExtras();
+    changed = (await syncState(0)) || changed;
+    SYNC.lastError = null;
+    SYNC.lastErrorAt = null;
+    ok = true;
+    setSyncState('ok');
+  } catch (e) {
+    console.warn('sync', e);
+    SYNC.lastError = syncErrorText(e);
+    SYNC.lastErrorAt = new Date().toISOString();
+    setSyncState(e.code === 'network' ? 'offline' : 'error');
+  } finally {
+    _syncBusy = false;
+    await saveSyncCfg();
+    if (_syncAgain) {
+      _syncAgain = false;
+      scheduleSync(3000);
+    }
+  }
+  if (changed || opts.rerender) safeRerender();
+  return ok;
+}
+
+// برمی‌گرداند که داده‌های روی گوشی عوض شد یا نه
+async function syncState(attempt) {
+  const stat = await ghStat('state.json');
+  try {
+    if (S.meta.forcePushAt && S.meta.forcePushAt !== SYNC.lastForceAt) {
+      const forceAt = S.meta.forcePushAt;
+      SYNC.lastSha = await ghWrite('state.json', remotePayload(), stat ? stat.sha : undefined, commitMsg('جایگزینی کامل'));
+      SYNC.lastHash = hashStr(canonicalState(S));
+      SYNC.lastForceAt = forceAt;
+      afterPush();
+      return false;
+    }
+    let changed = false;
+    let baseSha = stat ? stat.sha : undefined;
+    if (stat && stat.sha !== SYNC.lastSha) {
+      const file = await ghRead('state.json');
+      if (file) {
+        const remote = migrate(parseBackup(file.text));
+        const remoteHash = hashStr(canonicalState(remote));
+        if (mergeInto(S, remote)) {
+          changed = true;
+          invalidateLeads();
+          await save(true, true);
+        }
+        SYNC.lastSha = file.sha;
+        SYNC.lastHash = remoteHash;
+        baseSha = file.sha;
+      }
+    }
+    const h = hashStr(canonicalState(S));
+    if (!stat || h !== SYNC.lastHash) {
+      SYNC.lastSha = await ghWrite('state.json', remotePayload(), baseSha, commitMsg());
+      SYNC.lastHash = h;
+      afterPush();
+    }
+    SYNC.lastPullAt = new Date().toISOString();
+    return changed;
+  } catch (e) {
+    if ((e.status === 409 || e.status === 422) && attempt < 2) {
+      SYNC.lastSha = null;
+      return syncState(attempt + 1);
+    }
+    throw e;
+  }
+}
+
+function afterPush() {
+  const now = new Date().toISOString();
+  SYNC.lastPushAt = now;
+  S.meta.lastBackupAt = now;
+  save(false, true);
+}
+
+// ادغام نسخه‌ی گیت‌هاب در داده‌های روی گوشی (بدون عوض شدن اشیای فعلی)
+function mergeInto(dst, remote) {
+  let changed = false;
+  const tomb = dst.tomb || (dst.tomb = {});
+  for (const id in remote.tomb || {}) {
+    if (!tomb[id] || remote.tomb[id] > tomb[id]) {
+      tomb[id] = remote.tomb[id];
+      changed = true;
+    }
+  }
+  const cutoff = new Date(Date.now() - 180 * DAY_MS).toISOString();
+  for (const id in tomb) if (tomb[id] < cutoff) delete tomb[id];
+  const dead = (x) => tomb[x.id] && tomb[x.id] >= (x.updatedAt || '');
+  for (const k of COLLS) {
+    const arr = dst[k];
+    const idx = new Map(arr.map((x, i) => [x.id, i]));
+    for (const x of remote[k] || []) {
+      const i = idx.get(x.id);
+      if (i == null) {
+        if (!dead(x)) {
+          arr.push(x);
+          changed = true;
+        }
+      } else if ((x.updatedAt || '') > (arr[i].updatedAt || '')) {
+        arr[i] = x;
+        changed = true;
+      }
+    }
+    if (arr.some(dead)) {
+      dst[k] = arr.filter((x) => !dead(x));
+      changed = true;
+    }
+  }
+  const rm = remote.meta || {};
+  if ((rm.settingsAt || '') > (dst.meta.settingsAt || '')) {
+    dst.settings = remote.settings;
+    dst.meta.settingsAt = rm.settingsAt;
+    _lastSettingsJSON = JSON.stringify(dst.settings);
+    changed = true;
+  }
+  for (const key in remote.inbox || {}) {
+    const b = remote.inbox[key];
+    const a = dst.inbox[key];
+    if (!a) {
+      dst.inbox[key] = b;
+      changed = true;
+      continue;
+    }
+    const dec = Object.assign({}, b.decisions || {}, a.decisions || {});
+    if (Object.keys(dec).length !== Object.keys(a.decisions || {}).length) {
+      a.decisions = dec;
+      changed = true;
+    }
+    if (!a.readAt && b.readAt) {
+      a.readAt = b.readAt;
+      changed = true;
+    }
+  }
+  for (const id of remote.igIgnored || []) {
+    if (dst.igIgnored.indexOf(id) < 0) {
+      dst.igIgnored.push(id);
+      changed = true;
+    }
+  }
+  if ((rm.lastBackupAt || '') > (dst.meta.lastBackupAt || '')) dst.meta.lastBackupAt = rm.lastBackupAt;
+  return changed;
+}
+
+async function syncExtras() {
+  SYNC.lastExtrasAt = Date.now();
+  let changed = false;
+  let fresh = 0;
+  const files = await ghList('inbox');
+  for (const f of files) {
+    if (f.type !== 'file' || !/\.json$/i.test(f.name)) continue;
+    const known = S.inbox[f.name];
+    if (known && known.sha === f.sha) continue;
+    const file = await ghRead('inbox/' + f.name);
+    if (!file) continue;
+    const entry = parseInbox(file.text, f.name);
+    if (!entry) continue;
+    entry.sha = file.sha;
+    if (known) {
+      entry.decisions = known.decisions || {};
+      entry.readAt = known.readAt || null;
+      entry.importedAt = known.importedAt || entry.importedAt;
+    } else {
+      fresh++;
+    }
+    S.inbox[f.name] = entry;
+    markAnswered(entry);
+    changed = true;
+  }
+  const igStat = await ghStat('instagram/media.json');
+  if (igStat && igStat.sha !== SYNC.igSha) {
+    const file = await ghRead('instagram/media.json');
+    if (file) {
+      let data = null;
+      try { data = JSON.parse(file.text); } catch (e) { data = null; }
+      if (data && data.kind === 'studio-instagram') {
+        await igSaveCache(data);
+        if (igApply(data)) changed = true;
+      }
+      SYNC.igSha = file.sha;
+    }
+  }
+  const stStat = await ghStat('instagram/status.json');
+  if (stStat && stStat.sha !== SYNC.igStatusSha) {
+    const file = await ghRead('instagram/status.json');
+    if (file) {
+      try { IG_STATUS = JSON.parse(file.text); } catch (e) { IG_STATUS = null; }
+      try { await kvSet('igStatus', IG_STATUS); } catch (e) { /* ignore */ }
+      SYNC.igStatusSha = file.sha;
+    }
+  }
+  if (changed) {
+    invalidateLeads();
+    await save(true, true);
+  }
+  if (fresh) toast(fresh === 1 ? 'یک تحلیل تازه از Claude رسید' : faNum(fresh) + ' تحلیل تازه از Claude رسید');
+  return changed;
+}
+
+/* ---------- اتصال، کد بازیابی، قطع اتصال ---------- */
+function recoveryCode() {
+  if (!SYNC) return '';
+  const json = JSON.stringify({ o: SYNC.owner, r: SYNC.repo, t: SYNC.token });
+  return 'studio1.' + utf8ToB64(json).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function parseConnectInput(text) {
+  const t = String(text || '').trim().replace(/\s+/g, '');
+  if (!t) return null;
+  const m = t.match(/studio1\.([A-Za-z0-9_-]+)/);
+  if (m) {
+    try {
+      let b = m[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (b.length % 4) b += '=';
+      const o = JSON.parse(b64ToUtf8(b));
+      if (o && o.t) return { token: o.t, owner: o.o || null, repo: o.r || null };
+    } catch (e) {
+      return null;
+    }
+    return null;
+  }
+  if (/^(github_pat_|ghp_|gho_|ghu_)[A-Za-z0-9_]+$/.test(t)) return { token: t, owner: null, repo: null };
+  return null;
+}
+
+async function connectSync(input, repoName) {
+  const p = parseConnectInput(input);
+  if (!p) throw ghError('bad-input', 'bad-input');
+  const user = await gh('GET', '/user', null, { token: p.token });
+  const owner = p.owner || user.login;
+  const repo = (repoName || p.repo || DATA_REPO_DEFAULT).trim();
+  const info = await gh('GET', '/repos/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo), null, { token: p.token });
+  if (!info.private) throw ghError('public', 'public');
+  if (info.permissions && info.permissions.push === false) throw ghError('noperm', 'noperm');
+  SYNC = { owner, repo, token: p.token, branch: info.default_branch || 'main', connectedAt: new Date().toISOString(), lastSha: null, lastHash: null, igSha: null, igStatusSha: null };
+  await saveSyncCfg();
+  try { await ensureRepoDocs(); } catch (e) { console.warn('docs', e); }
+  const ok = await syncNow({ extras: true, rerender: true });
+  if (!ok) throw ghError(SYNC.lastError || 'sync', 'sync');
+  return true;
+}
+
+async function disconnectSync() {
+  SYNC = null;
+  clearTimeout(_syncTimer);
+  setSyncState('off');
+  await saveSyncCfg();
+}
+
+async function ensureRepoDocs() {
+  const docs = [['README.md', REPO_README], ['CLAUDE.md', REPO_CLAUDE]];
+  for (const [path, text] of docs) {
+    const st = await ghStat(path);
+    if (!st) await ghWrite(path, text, undefined, 'راهنمای ریپوی داده‌ها');
+  }
+}
+
+async function ghHistory() {
+  const list = await gh('GET', repoPath('/commits?path=state.json&per_page=30'));
+  return (list || []).map((c) => ({ sha: c.sha, date: (c.commit && (c.commit.committer || c.commit.author) || {}).date, msg: c.commit ? c.commit.message : '' }));
+}
+
+function syncWhenText() {
+  if (!SYNC) return 'خاموش';
+  if (_syncState === 'syncing') return 'در حال ارسال…';
+  if (SYNC.lastError) return SYNC.lastError;
+  if (!SYNC.lastPushAt && !SYNC.lastPullAt) return 'هنوز همگام نشده';
+  const t = SYNC.lastPushAt || SYNC.lastPullAt;
+  const mins = Math.round((Date.now() - new Date(t).getTime()) / 60000);
+  if (mins < 1) return 'همین الان';
+  if (mins < 60) return fmtNum(mins) + ' دقیقه پیش';
+  if (mins < 48 * 60) return fmtNum(Math.round(mins / 60)) + ' ساعت پیش';
+  return fmtNum(Math.round(mins / 1440)) + ' روز پیش';
+}
+
+function startSyncLoops() {
+  if (SYNC) syncNow({ extras: true });
+  setInterval(() => {
+    if (SYNC && document.visibilityState === 'visible') syncNow({ extras: true });
+  }, EXTRAS_EVERY);
+  window.addEventListener('online', () => { if (SYNC) syncNow(); });
+  document.addEventListener('visibilitychange', () => {
+    if (!SYNC) return;
+    if (document.visibilityState === 'hidden') syncNow();
+    else if (Date.now() - (SYNC.lastExtrasAt || 0) > 2 * 60000) syncNow({ extras: true });
+  });
+}
+
+/* ---------- تحلیل‌های Claude: صندوق پیشنهادها و سؤال‌ها ---------- */
+const SUG_LABEL = {
+  learning: 'درس',
+  idea: 'ایده',
+  snippet: 'هوک و CTA',
+  update: 'اصلاح پست',
+  note: 'یادداشت',
+  snapshot: 'آمار',
+  post: 'پست تازه',
+  checklist: 'قاعده‌ی چک‌لیست',
+};
+const SNAP_FIELD_NAMES = {
+  views: 'ویو', reach: 'ریچ', follows: 'فالوور', profileVisits: 'بازدید پروفایل', likes: 'لایک', comments: 'کامنت',
+  shares: 'شیر', saves: 'سیو', reposts: 'ریپست', likesPct: 'لایک٪', commentsPct: 'کامنت٪', sharesPct: 'شیر٪', savesPct: 'سیو٪',
+  repostsPct: 'ریپست٪', skipRate: 'اسکیپ‌ریت', avgWatch: 'واچ‌تایم', followersPct: 'فالوور٪', age2554: 'سن ۲۵ تا ۵۴٪', age1317: 'سن ۱۳ تا ۱۷٪',
+};
+const SNAP_SRC_KEYS = ['reels', 'explore', 'feed', 'stories', 'profile', 'other'];
+const UPDATE_FIELDS = {
+  title: 'عنوان', series: 'سری', goal: 'هدف', format: 'فرمت', pubType: 'نوع انتشار', style: 'سبک اجرا', hookType: 'نوع هوک',
+  ctaType: 'نوع CTA', source: 'منبع ایده', location: 'محل ضبط', concerns: 'دغدغه‌ها', durationSec: 'مدت ویدیو', publishDate: 'تاریخ انتشار',
+  publishTime: 'ساعت انتشار', caption: 'کپشن', priority: 'اولویت', stage: 'مرحله',
+};
+
+function _str(v, max) {
+  if (v == null) return '';
+  return String(v).slice(0, max || 4000).trim();
+}
+
+function _validISO(v) {
+  const d = v ? new Date(v) : null;
+  return d && !isNaN(d.getTime()) ? d.toISOString() : null;
+}
+
+function _validDate(v) {
+  return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(isoToDate(v).getTime()) ? v : null;
+}
+
+function _validTime(v) {
+  return typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(v) ? v : null;
+}
+
+function parseInbox(text, key) {
+  let o;
+  try { o = JSON.parse(text); } catch (e) { return null; }
+  if (!o || o.kind !== 'studio-inbox' || typeof o !== 'object') return null;
+  const sugs = (Array.isArray(o.suggestions) ? o.suggestions : [])
+    .filter((x) => x && typeof x === 'object')
+    .map((x, i) => Object.assign({}, x, { id: _str(x.id || 's' + (i + 1), 60), type: x.type === 'tag' ? 'update' : x.type }))
+    .filter((x) => SUG_LABEL[x.type])
+    .slice(0, 400);
+  return {
+    key,
+    id: _str(o.id || key, 120),
+    title: _str(o.title, 200) || 'تحلیل Claude',
+    createdAt: _validISO(o.createdAt) || new Date().toISOString(),
+    answers: o.answers ? _str(o.answers, 80) : null,
+    report: _str(o.report, 80000),
+    suggestions: sugs,
+    importedAt: new Date().toISOString(),
+    readAt: null,
+    decisions: {},
+  };
+}
+
+function markAnswered(entry) {
+  if (!entry.answers) return;
+  const q = S.questions.find((x) => x.id === entry.answers);
+  if (q && q.status !== 'answered') {
+    q.status = 'answered';
+    q.answerKey = entry.key;
+    q.updatedAt = new Date().toISOString();
+  }
+}
+
+function inboxList() {
+  return Object.keys(S.inbox).map((k) => S.inbox[k]).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+}
+
+function pendingCount(entry) {
+  return entry.suggestions.filter((s) => !entry.decisions[s.id]).length;
+}
+
+function unreadInbox() {
+  return inboxList().filter((e) => !e.readAt).length;
+}
+
+/* ---------- اعمال پیشنهادها ---------- */
+function _listValue(listKey, v) {
+  const t = _str(v, 80);
+  if (!t) return null;
+  const list = S.settings.lists[listKey] || (S.settings.lists[listKey] = []);
+  if (list.indexOf(t) < 0) list.push(t);
+  return t;
+}
+
+function _seriesId(v) {
+  if (!v) return null;
+  const sr = S.settings.series.find((s) => s.id === v || s.name === v || s.short === v);
+  return sr ? sr.id : null;
+}
+
+function _idIn(list, v) {
+  return list.some((x) => x.id === v) ? v : null;
+}
+
+function _num(v) {
+  const n = parseNum(v);
+  return n != null && Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function sanitizeSnap(src) {
+  const s = {};
+  if (!src || typeof src !== 'object') return s;
+  for (const k in SNAP_FIELD_NAMES) {
+    const v = _num(src[k]);
+    if (v != null) s[k] = v;
+  }
+  if (src.src && typeof src.src === 'object') {
+    const o = {};
+    for (const k of SNAP_SRC_KEYS) {
+      const v = _num(src.src[k]);
+      if (v != null) o[k] = v;
+    }
+    if (Object.keys(o).length) s.src = o;
+  }
+  const t = _num(src.t);
+  if (t != null) s.t = t;
+  if (src.label) s.label = _str(src.label, 60);
+  if (src.note) s.note = _str(src.note, 1000);
+  return s;
+}
+
+function upsertSnapshot(it, clean, extra) {
+  const now = new Date().toISOString();
+  const existing = clean.t != null ? it.snapshots.find((x) => x.t === clean.t) : null;
+  if (existing) {
+    Object.assign(existing, clean, extra || {});
+    if (clean.src) existing.src = Object.assign({}, existing.src || {}, clean.src);
+    existing.updatedAt = now;
+    return existing;
+  }
+  const snap = Object.assign({ id: uid('s'), takenAt: now, updatedAt: now, src: {} }, clean, extra || {});
+  if (!snap.src) snap.src = {};
+  insertSnapshot(it, snap);
+  return snap;
+}
+
+function applyItemFields(it, set) {
+  const done = [];
+  for (const k in set || {}) {
+    if (!UPDATE_FIELDS[k]) continue;
+    const v = set[k];
+    if (v === undefined) continue;
+    let nv;
+    if (k === 'series') nv = _seriesId(v);
+    else if (k === 'goal') nv = v == null ? null : _idIn(GOALS, v);
+    else if (k === 'format') nv = _idIn(FORMATS, v);
+    else if (k === 'pubType') nv = _idIn(PUBTYPES, v);
+    else if (k === 'priority') nv = _idIn(PRIORITIES, v);
+    else if (k === 'stage') nv = _idIn(STAGES, v);
+    else if (k === 'style') nv = _listValue('styles', v);
+    else if (k === 'hookType') nv = _listValue('hookTypes', v);
+    else if (k === 'ctaType') nv = _listValue('ctaTypes', v);
+    else if (k === 'source') nv = _listValue('sources', v);
+    else if (k === 'location') nv = _listValue('locations', v);
+    else if (k === 'concerns') nv = (Array.isArray(v) ? v : [v]).map((c) => _listValue('concerns', c)).filter(Boolean);
+    else if (k === 'durationSec') nv = _num(v);
+    else if (k === 'publishDate') nv = _validDate(v);
+    else if (k === 'publishTime') nv = v == null ? null : _validTime(v);
+    else nv = _str(v, k === 'caption' ? 5000 : 300);
+    if (nv === undefined || (nv === null && v != null && k !== 'goal')) continue;
+    if (k === 'title' && !nv) continue;
+    it[k] = nv;
+    done.push(UPDATE_FIELDS[k]);
+  }
+  if (it.stage === 'published' && it.order == null) it.order = nextOrder();
+  return done;
+}
+
+function applySuggestion(entry, s) {
+  const now = new Date().toISOString();
+  if (s.type === 'learning') {
+    const text = _str(s.text, 3000);
+    if (!text) throw new Error('متن درس خالیه');
+    S.learnings.push({
+      id: uid('e'), text, status: _idIn(L_STATUS, s.status) || 'hyp', category: s.category ? _listValue('lcats', s.category) : null,
+      itemIds: (Array.isArray(s.itemIds) ? s.itemIds : []).filter((id) => itemById(id)), date: todayISO(), by: 'claude', createdAt: now, updatedAt: now,
+    });
+    return 'به دفترچه اضافه شد';
+  }
+  if (s.type === 'idea') {
+    const title = _str(s.title, 300);
+    if (!title) throw new Error('عنوان ایده خالیه');
+    const it = newItem({ title, stage: 'idea', series: _seriesId(s.series) || 'other', notes: _str(s.notes, 5000), by: 'claude' });
+    applyItemFields(it, { goal: s.goal, format: s.format || 'reel', concerns: s.concerns || [], source: s.source || 'ایده‌پردازی با Claude', priority: s.priority || 'mid', style: s.style, hookType: s.hookType, location: s.location });
+    if (!s.goal) it.goal = null;
+    if (s.hook) it.script.hook = _str(s.hook, 300);
+    S.items.push(it);
+    return 'به ایده‌ها اضافه شد';
+  }
+  if (s.type === 'snippet') {
+    const text = _str(s.text, 600);
+    if (!text) throw new Error('متن خالیه');
+    const kind = _idIn(SNIP_KINDS, s.kind) || 'hook';
+    if (S.snippets.some((x) => x.kind === kind && x.text === text)) return 'از قبل توی بانک بود';
+    S.snippets.push({ id: uid('n'), kind, text, series: _seriesId(s.series), itemId: itemById(s.itemId) ? s.itemId : null, used: false, result: null, by: 'claude', createdAt: now, updatedAt: now });
+    return 'به بانک اضافه شد';
+  }
+  if (s.type === 'checklist') {
+    const text = _str(s.text, 300);
+    if (!text) throw new Error('متن خالیه');
+    if (!S.settings.checklist.some((c) => c.text === text)) S.settings.checklist.push({ id: uid('c'), text });
+    return 'به چک‌لیست اضافه شد';
+  }
+  if (s.type === 'post') {
+    const p = s.item || {};
+    const title = _str(p.title, 300);
+    if (!title) throw new Error('عنوان پست خالیه');
+    const it = newItem({ title, stage: 'published', series: _seriesId(p.series) || 'other', notes: _str(p.notes, 5000), by: 'claude' });
+    it.goal = null;
+    applyItemFields(it, Object.assign({}, p, { title: undefined, series: undefined, notes: undefined, stage: 'published' }));
+    it.order = nextOrder();
+    (Array.isArray(s.snapshots) ? s.snapshots : []).forEach((x) => upsertSnapshot(it, sanitizeSnap(x), { by: 'claude' }));
+    S.items.push(it);
+    return 'پست ساخته شد';
+  }
+  const it = itemById(s.itemId);
+  if (!it) throw new Error('این پست توی اپ پیدا نشد');
+  if (s.type === 'update') {
+    const done = applyItemFields(it, s.set || s.fields || {});
+    if (!done.length) throw new Error('چیزی برای تغییر نبود');
+    it.updatedAt = now;
+    return 'به‌روز شد: ' + done.join('، ');
+  }
+  if (s.type === 'note') {
+    const text = _str(s.text, 5000);
+    if (!text) throw new Error('متن خالیه');
+    it.notes = (it.notes ? it.notes + '\n\n' : '') + '[Claude، ' + fmtJ(todayISO(), { year: true }) + '] ' + text;
+    it.updatedAt = now;
+    return 'به یادداشت‌های پست اضافه شد';
+  }
+  if (s.type === 'snapshot') {
+    const clean = sanitizeSnap(s.snapshot || s);
+    if (!Object.keys(clean).some((k) => SNAP_FIELD_NAMES[k] || k === 'src')) throw new Error('عددی توی این آمار نیست');
+    if (it.stage !== 'published') it.stage = 'published';
+    if (it.order == null) it.order = nextOrder();
+    upsertSnapshot(it, clean, { by: 'claude' });
+    if (s.durationSec != null && _num(s.durationSec) != null) it.durationSec = _num(s.durationSec);
+    it.updatedAt = now;
+    return 'آمار ثبت شد';
+  }
+  throw new Error('نوع ناشناخته');
+}
+
+function decide(entry, s, d, note) {
+  entry.decisions[s.id] = { d, at: new Date().toISOString(), r: note || '' };
+}
+
+function applyOne(entry, s) {
+  try {
+    const r = applySuggestion(entry, s);
+    decide(entry, s, 'applied', r);
+    return { ok: true, msg: r };
+  } catch (e) {
+    return { ok: false, msg: e.message || 'اعمال نشد' };
+  }
+}
+
+/* ---------- نمایش ---------- */
+function mdInline(t) {
+  return esc(t)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function mdLite(src) {
+  const lines = String(src || '').replace(/\r/g, '').split('\n');
+  let html = '';
+  let list = null;
+  let para = [];
+  let table = null;
+  const flushPara = () => {
+    if (para.length) html += '<p>' + mdInline(para.join(' ')) + '</p>';
+    para = [];
+  };
+  const flushList = () => {
+    if (list) html += '</' + list + '>';
+    list = null;
+  };
+  const flushTable = () => {
+    if (!table) return;
+    const rows = table.filter((r) => !r.every((c) => /^:?-{2,}:?$/.test(c)));
+    if (rows.length) {
+      html += '<div class="md-tw"><table class="md-t"><thead><tr>' + rows[0].map((c) => '<th>' + mdInline(c) + '</th>').join('') + '</tr></thead><tbody>' +
+        rows.slice(1).map((r) => '<tr>' + r.map((c) => '<td>' + mdInline(c) + '</td>').join('') + '</tr>').join('') + '</tbody></table></div>';
+    }
+    table = null;
+  };
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.startsWith('|')) {
+      flushPara();
+      flushList();
+      const cells = line.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+      (table || (table = [])).push(cells);
+      continue;
+    }
+    flushTable();
+    if (!line) {
+      flushPara();
+      flushList();
+      continue;
+    }
+    let m;
+    if ((m = line.match(/^(#{1,4})\s+(.*)$/))) {
+      flushPara();
+      flushList();
+      const lvl = m[1].length <= 2 ? 3 : 4;
+      html += '<h' + lvl + ' class="md-h">' + mdInline(m[2]) + '</h' + lvl + '>';
+      continue;
+    }
+    if ((m = line.match(/^[-*•]\s+(.*)$/))) {
+      flushPara();
+      if (list !== 'ul') {
+        flushList();
+        html += '<ul>';
+        list = 'ul';
+      }
+      html += '<li>' + mdInline(m[1]) + '</li>';
+      continue;
+    }
+    if ((m = line.match(/^[0-9۰-۹]+[.)]\s+(.*)$/))) {
+      flushPara();
+      if (list !== 'ol') {
+        flushList();
+        html += '<ol>';
+        list = 'ol';
+      }
+      html += '<li>' + mdInline(m[1]) + '</li>';
+      continue;
+    }
+    if ((m = line.match(/^>\s?(.*)$/))) {
+      flushPara();
+      flushList();
+      html += '<blockquote>' + mdInline(m[1]) + '</blockquote>';
+      continue;
+    }
+    flushList();
+    para.push(line);
+  }
+  flushTable();
+  flushPara();
+  flushList();
+  return html;
+}
+
+function _itemChip(id) {
+  const it = id ? itemById(id) : null;
+  if (!it) return '';
+  return '<button type="button" class="lk" data-go="#/item/' + it.id + '"><span class="sdot" style="' + seriesVar(it.series) + '"></span>' + esc(it.title) + '</button>';
+}
+
+function _fieldValueText(k, v) {
+  if (v == null || v === '') return 'خالی';
+  if (k === 'series') return seriesById(_seriesId(v) || 'other').name;
+  if (k === 'goal') return nameOf(GOALS, v) || String(v);
+  if (k === 'format') return nameOf(FORMATS, v) || String(v);
+  if (k === 'pubType') return nameOf(PUBTYPES, v) || String(v);
+  if (k === 'stage') return nameOf(STAGES, v) || String(v);
+  if (k === 'publishDate') return _validDate(v) ? fmtJ(v, { year: true }) : String(v);
+  if (k === 'durationSec') return fmtNum(_num(v)) + ' ثانیه';
+  if (Array.isArray(v)) return v.join('، ');
+  return String(v);
+}
+
+function _snapSummary(x) {
+  const c = sanitizeSnap(x);
+  const parts = [];
+  for (const k of ['views', 'reach', 'follows', 'saves', 'savesPct', 'shares', 'sharesPct', 'avgWatch', 'skipRate']) {
+    if (c[k] == null) continue;
+    const pct = /Pct$|skipRate/.test(k);
+    parts.push(SNAP_FIELD_NAMES[k] + ' ' + (pct ? fmtPct(c[k]) : k === 'avgWatch' ? fmtNum(c[k], 1) + ' ث' : fmtNum(c[k])));
+  }
+  const when = c.t != null ? checkpointName(c.t, c.label) : c.label || 'ثبت دستی';
+  return when + (parts.length ? ': ' + parts.join('، ') : '');
+}
+
+function sugBody(s) {
+  if (s.type === 'learning') return '<p>' + esc(s.text) + '</p>' + (s.status ? '<span class="muted small">' + esc(nameOf(L_STATUS, s.status) || '') + '</span>' : '');
+  if (s.type === 'idea') return '<p><b>' + esc(s.title) + '</b></p>' + (s.notes ? '<p class="muted small">' + esc(s.notes) + '</p>' : '') + (s.series ? seriesTag(_seriesId(s.series) || 'other') : '');
+  if (s.type === 'snippet') return '<p>' + esc(s.text) + '</p><span class="muted small">' + esc(nameOf(SNIP_KINDS, s.kind) || 'هوک') + '</span>';
+  if (s.type === 'checklist') return '<p>' + esc(s.text) + '</p>';
+  if (s.type === 'note') return '<p>' + esc(s.text) + '</p>';
+  if (s.type === 'update') {
+    const set = s.set || s.fields || {};
+    return '<ul class="sug-ul">' + Object.keys(set).filter((k) => UPDATE_FIELDS[k]).map((k) => '<li>' + esc(UPDATE_FIELDS[k]) + ': ' + esc(_fieldValueText(k, set[k])) + '</li>').join('') + '</ul>';
+  }
+  if (s.type === 'snapshot') return '<p>' + esc(_snapSummary(s.snapshot || s)) + '</p>';
+  if (s.type === 'post') {
+    const p = s.item || {};
+    return '<p><b>' + esc(p.title || '') + '</b></p><p class="muted small">' + esc([p.publishDate && _validDate(p.publishDate) ? fmtJ(p.publishDate, { year: true }) : '', p.series ? seriesById(_seriesId(p.series) || 'other').name : ''].filter(Boolean).join('، ')) + '</p>' +
+      (Array.isArray(s.snapshots) && s.snapshots.length ? '<p class="muted small">' + esc(s.snapshots.map(_snapSummary).join(' | ')) + '</p>' : '');
+  }
+  return '';
+}
+
+function sugCardHtml(entry, s) {
+  const d = entry.decisions[s.id];
+  const status = d ? (d.d === 'applied' ? badgeHtml('اعمال شد', 'good', 'check') : badgeHtml('رد شد')) : '';
+  return '<article class="sug' + (d ? ' done' : '') + '" data-sid="' + esc(s.id) + '">' +
+    ((s.itemId && itemById(s.itemId)) || status ? '<div class="sug-top">' + _itemChip(s.itemId) + status + '</div>' : '') +
+    '<div class="sug-body">' + sugBody(s) + '</div>' +
+    (s.why ? '<p class="sug-why">' + esc(s.why) + '</p>' : '') +
+    (d && d.r ? '<p class="muted small">' + esc(d.r) + '</p>' : '') +
+    (d ? '' : '<div class="sug-act"><button type="button" class="btn sm primary" data-apply="' + esc(s.id) + '">' + ic('check') + 'اعمال</button><button type="button" class="btn sm ghost" data-reject="' + esc(s.id) + '">رد</button></div>') +
+    '</article>';
+}
+
+function viewClaude() {
+  const list = inboxList();
+  const open = S.questions.filter((q) => q.status !== 'answered').sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  let h = '<p class="muted small">تحلیل‌ها و پیشنهادهای Claude اینجا میاد. هر پیشنهاد رو بخون و اگه درست بود «اعمال» رو بزن تا به درس‌ها، ایده‌ها یا پست‌ها اضافه بشه.</p>';
+  if (!SYNC) {
+    h += '<div class="note warn">' + ic('cloud') + '<div><b>پشتیبان خودکار وصل نیست</b><p>بدون اتصال، تحلیل‌ها رو باید به‌صورت فایل از Claude بگیری و از «وارد کردن فایل» بازشون کنی.</p><button type="button" class="btn sm" data-go="#/backup">وصل کردن</button></div></div>';
+  }
+  h += '<div class="btn-row"><button type="button" class="btn sm primary" data-ask>' + ic('msg') + 'سؤال از Claude</button><button type="button" class="btn sm" data-full>' + ic('spark') + 'درخواست تحلیل کامل</button>' +
+    (SYNC ? '<button type="button" class="btn sm ghost" data-pull>' + ic('refresh') + 'بروزرسانی</button>' : '<button type="button" class="btn sm ghost" data-imp>' + ic('upload') + 'وارد کردن فایل</button>') + '</div>';
+  if (open.length) {
+    h += '<section class="sec">' + secHead('در انتظار جواب') + '<div class="list">' + open.map((q) =>
+      '<div class="row static"><span class="ric">' + ic('clock') + '</span><span class="rt"><b>' + esc(q.text) + '</b><span>' + fmtJ(dateToISO(new Date(q.createdAt))) + (q.itemId && itemById(q.itemId) ? '، درباره‌ی «' + esc(itemById(q.itemId).title) + '»' : '') + '</span>' +
+      '<span class="row-actions"><button type="button" class="btn sm" data-copyq="' + q.id + '">' + ic('copy') + 'کپی پیام برای Claude</button><button type="button" class="btn sm ghost" data-delq="' + q.id + '">حذف</button></span></span></div>').join('') + '</div></section>';
+  }
+  if (!list.length) {
+    h += emptyHtml('spark', 'هنوز تحلیلی نرسیده', 'یک سؤال بپرس یا «درخواست تحلیل کامل» رو بزن، پیام رو توی چت Claude بفرست؛ جواب همین‌جا میاد.');
+  } else {
+    h += '<section class="sec">' + secHead('تحلیل‌ها') + '<div class="cards">' + list.map((e) => {
+      const p = pendingCount(e);
+      return '<article class="icard" tabindex="0" role="link" data-go="#/claude/' + encodeURIComponent(e.key) + '">' +
+        '<div class="icard-top">' + (e.readAt ? '' : badgeHtml('تازه', 'gold')) + (p ? badgeHtml(faNum(p) + ' پیشنهاد باز') : badgeHtml('همه بررسی شد', 'good')) +
+        '<span class="icard-date">' + fmtJ(dateToISO(new Date(e.createdAt))) + '</span></div><h3>' + esc(e.title) + '</h3></article>';
+    }).join('') + '</div></section>';
+  }
+  return {
+    title: 'تحلیل‌های Claude',
+    back: '/more',
+    tab: 'more',
+    html: h,
+    fab: { icon: 'msg', label: 'سؤال از Claude', fn: () => askClaudeSheet() },
+    mount: (root) => {
+      root.addEventListener('click', async (e) => {
+        if (e.target.closest('[data-ask]')) { askClaudeSheet(); return; }
+        if (e.target.closest('[data-full]')) {
+          askClaudeSheet({ text: 'یک تحلیل کامل از عملکرد پیج بده: چی جواب داده، چی نه، کدوم فرضیه‌های دفترچه با داده‌ها جور درمیان، و برای دو هفته‌ی آینده چی بسازم.' });
+          return;
+        }
+        if (e.target.closest('[data-pull]')) {
+          toast('در حال بروزرسانی…');
+          const ok = await syncNow({ extras: true, rerender: true });
+          if (!ok) toast(SYNC && SYNC.lastError ? SYNC.lastError : 'بروزرسانی نشد');
+          return;
+        }
+        if (e.target.closest('[data-imp]')) { pickImportFile(); return; }
+        const cq = e.target.closest('[data-copyq]');
+        if (cq) {
+          const q = S.questions.find((x) => x.id === cq.dataset.copyq);
+          if (q) copyText(claudeMessage(q), 'پیام کپی شد؛ توی چت Claude بفرست');
+          return;
+        }
+        const dq = e.target.closest('[data-delq]');
+        if (dq) {
+          const q = S.questions.find((x) => x.id === dq.dataset.delq);
+          if (!q) return;
+          S.questions = S.questions.filter((x) => x !== q);
+          markDeleted(q.id);
+          save();
+          rerender();
+        }
+      });
+    },
+  };
+}
+
+function viewClaudeEntry(key) {
+  const entry = S.inbox[key];
+  if (!entry) return notFoundView('این تحلیل پیدا نشد.');
+  if (!entry.readAt) {
+    entry.readAt = new Date().toISOString();
+    save();
+  }
+  const q = entry.answers ? S.questions.find((x) => x.id === entry.answers) : null;
+  const pending = pendingCount(entry);
+  const groups = {};
+  entry.suggestions.forEach((s) => { (groups[s.type] || (groups[s.type] = [])).push(s); });
+  let h = '<div class="claude-head"><h2>' + esc(entry.title) + '</h2><span class="muted small">' + fmtJ(dateToISO(new Date(entry.createdAt)), { weekday: true, year: true }) + '</span>' +
+    (q ? '<div class="q-box">' + ic('msg') + '<span>' + esc(q.text) + '</span></div>' : '') + '</div>';
+  if (entry.report) h += '<section class="md card">' + mdLite(entry.report) + '</section>';
+  if (entry.suggestions.length) {
+    h += '<section class="sec">' + secHead('پیشنهادها', pending ? '<button type="button" class="link" data-all>اعمال همه‌ی ' + faNum(pending) + ' پیشنهاد</button>' : '<span class="muted small">همه بررسی شد</span>') +
+      Object.keys(SUG_LABEL).filter((t) => groups[t]).map((t) => '<div class="group-h">' + SUG_LABEL[t] + '<span>' + faNum(groups[t].length) + '</span></div><div class="cards">' + groups[t].map((s) => sugCardHtml(entry, s)).join('') + '</div>').join('') + '</section>';
+  }
+  return {
+    title: 'تحلیل Claude',
+    back: '/claude',
+    tab: 'more',
+    html: h,
+    mount: (root) => {
+      root.addEventListener('click', async (e) => {
+        const ap = e.target.closest('[data-apply]');
+        if (ap) {
+          const s = entry.suggestions.find((x) => x.id === ap.dataset.apply);
+          const r = applyOne(entry, s);
+          if (r.ok) {
+            invalidateLeads();
+            save();
+            toast(r.msg);
+            rerender();
+          } else toast(r.msg);
+          return;
+        }
+        const rj = e.target.closest('[data-reject]');
+        if (rj) {
+          const s = entry.suggestions.find((x) => x.id === rj.dataset.reject);
+          decide(entry, s, 'rejected');
+          save();
+          rerender();
+          return;
+        }
+        if (e.target.closest('[data-all]')) {
+          const ok = await confirmBox({ title: 'همه‌ی پیشنهادها اعمال بشه؟', text: faNum(pending) + ' پیشنهاد به درس‌ها، ایده‌ها و پست‌ها اضافه می‌شه. قبلش یک نسخه برای برگشت نگه داشته می‌شه.', ok: 'اعمال همه' });
+          if (!ok) return;
+          await keepSafetyCopy();
+          let good = 0, bad = 0;
+          for (const s of entry.suggestions) {
+            if (entry.decisions[s.id]) continue;
+            const r = applyOne(entry, s);
+            if (r.ok) good++; else bad++;
+          }
+          invalidateLeads();
+          save();
+          toast(faNum(good) + ' پیشنهاد اعمال شد' + (bad ? '، ' + faNum(bad) + ' مورد نشد' : ''));
+          rerender();
+        }
+      });
+    },
+  };
+}
+
+/* ---------- سؤال از Claude ---------- */
+function claudeMessage(q) {
+  const it = q.itemId ? itemById(q.itemId) : null;
+  const about = it ? ' (درباره‌ی پست «' + it.title + '»)' : '';
+  if (SYNC) {
+    return 'توی استودیو محتوا یک سؤال تازه ثبت کردم (کد ' + q.id + ')' + about + ': «' + q.text + '»\n' +
+      'داده‌ها رو از ریپوی ' + SYNC.owner + '/' + SYNC.repo + ' بخون، تحلیل کن و جواب و پیشنهادها رو توی پوشه‌ی inbox همون ریپو بنویس.';
+  }
+  return 'سؤال از استودیو محتوا (کد ' + q.id + ')' + about + ': «' + q.text + '»\n' +
+    'فایل پشتیبان استودیو رو ضمیمه کردم. جواب و پیشنهادها رو به‌صورت یک فایل inbox (studio-inbox) بده تا توی اپ واردش کنم.';
+}
+
+function askClaudeSheet(preset) {
+  preset = preset || {};
+  const d = { text: preset.text || '', itemId: preset.itemId || null };
+  const it = d.itemId ? itemById(d.itemId) : null;
+  openSheet({
+    title: 'سؤال از Claude',
+    body: (it ? '<div class="lk-row">' + _itemChip(it.id) + '</div>' : '') +
+      fieldHtml('سؤالت', taHtml('text', d.text, { rows: 4, af: true, ph: 'مثلاً: چرا ریلزهای آشپزی سیو کمتری گرفتن؟' })) +
+      '<p class="fhint">سؤال توی اپ ثبت می‌شه. بعدش یک پیام آماده کپی می‌کنی و توی چت Claude می‌فرستی؛ جواب توی «تحلیل‌های Claude» میاد.</p>' +
+      '<div class="sheet-actions"><button type="button" class="btn primary" data-save>ثبت و کپی پیام</button><button type="button" class="btn ghost" data-sclose>انصراف</button></div>',
+    onMount: (b) => {
+      bindForm(b, d);
+      b.addEventListener('click', (e) => {
+        if (!e.target.closest('[data-save]')) return;
+        const text = (d.text || '').trim();
+        if (!text) { toast('سؤالت رو بنویس'); return; }
+        const now = new Date().toISOString();
+        const q = { id: 'q-' + Date.now().toString(36), text, itemId: d.itemId, status: 'open', createdAt: now, updatedAt: now };
+        S.questions.push(q);
+        save();
+        if (SYNC) syncNow();
+        const msg = claudeMessage(q);
+        copyText(msg, 'پیام کپی شد؛ توی چت Claude بفرست');
+        closeSheet(() => questionSentSheet(q, msg));
+      });
+    },
+  });
+}
+
+function questionSentSheet(q, msg) {
+  openSheet({
+    title: 'حالا توی چت Claude بفرست',
+    body: '<p class="sheet-text">این پیام کپی شد. چت پروژه‌ی «کار و تولید محتوا کلینیک» رو توی اپ Claude باز کن و بفرستش.</p>' +
+      '<div class="msg-box">' + esc(msg).replace(/\n/g, '<br>') + '</div>' +
+      (SYNC ? '' : '<p class="sheet-text">چون پشتیبان خودکار وصل نیست، فایل پشتیبان رو هم باید همراهش بفرستی.</p>') +
+      '<div class="sheet-actions"><button type="button" class="btn primary" data-copy>' + ic('copy') + 'کپی دوباره</button>' +
+      (SYNC ? '' : '<button type="button" class="btn" data-share>' + ic('share') + 'فرستادن فایل</button>') + '</div>',
+    onMount: (b) => {
+      b.addEventListener('click', async (e) => {
+        if (e.target.closest('[data-copy]')) copyText(msg, 'کپی شد');
+        if (e.target.closest('[data-share]')) {
+          const r = await shareBackup();
+          if (r !== 'aborted') markBackedUp();
+        }
+      });
+    },
+    onClose: () => { if (location.hash.indexOf('#/claude') === 0) rerender(); },
+  });
+}
+
+function importInboxText(text, name) {
+  const entry = parseInbox(text, name || 'file-' + Date.now().toString(36) + '.json');
+  if (!entry) return null;
+  const key = 'file-' + entry.id.replace(/[^\w.-]+/g, '-');
+  entry.key = key;
+  if (S.inbox[key]) {
+    entry.decisions = S.inbox[key].decisions || {};
+    entry.readAt = S.inbox[key].readAt || null;
+  }
+  S.inbox[key] = entry;
+  markAnswered(entry);
+  save();
+  return key;
+}
+
+/* ---------- اینستاگرام: آماری که گیت‌هاب اکشنز از API رسمی می‌گیرد ---------- */
+let IG = null; // آخرین instagram/media.json
+let IG_STATUS = null; // آخرین instagram/status.json
+
+async function igLoadCache() {
+  try { IG = (await kvGet('ig')) || null; } catch (e) { IG = null; }
+  try { IG_STATUS = (await kvGet('igStatus')) || null; } catch (e) { IG_STATUS = null; }
+}
+
+async function igSaveCache(data) {
+  IG = data;
+  try { await kvSet('ig', data); } catch (e) { /* ignore */ }
+}
+
+function igTime(ts) {
+  const d = new Date(String(ts || '').replace(/([+-]\d\d)(\d\d)$/, '$1:$2'));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function igLocal(ts) {
+  const d = igTime(ts);
+  return d ? { date: dateToISO(d), time: pad2(d.getHours()) + ':' + pad2(d.getMinutes()) } : null;
+}
+
+function igFormat(m) {
+  if (m.media_product_type === 'REELS') return 'reel';
+  if (m.media_type === 'CAROUSEL_ALBUM') return 'carousel';
+  if (m.media_product_type === 'STORY') return 'story';
+  return 'post';
+}
+
+function igTitle(m) {
+  const first = String(m.caption || '').split('\n').map((l) => l.replace(/#[^\s#]+/g, '').trim()).find((l) => l.length > 1) || '';
+  const t = Array.from(first).slice(0, 70).join('');
+  if (t) return t + (Array.from(first).length > 70 ? '…' : '');
+  const loc = igLocal(m.timestamp);
+  return 'پست ' + (loc ? fmtJ(loc.date, { year: true }) : 'اینستاگرام');
+}
+
+// تبدیل نام شاخص‌های API به فیلدهای فرم آمار
+function igSnap(m) {
+  const s = {};
+  const map = { views: 'views', reach: 'reach', likes: 'likes', comments: 'comments', shares: 'shares', saved: 'saves', reposts: 'reposts', follows: 'follows', profile_visits: 'profileVisits' };
+  for (const k in map) {
+    const v = m[k];
+    if (v != null && Number.isFinite(+v)) s[map[k]] = +v;
+  }
+  if (m.ig_reels_avg_watch_time != null && Number.isFinite(+m.ig_reels_avg_watch_time)) {
+    const v = +m.ig_reels_avg_watch_time;
+    s.avgWatch = Math.round((v > 600 ? v / 1000 : v) * 10) / 10;
+  }
+  if (m.reels_skip_rate != null && Number.isFinite(+m.reels_skip_rate)) {
+    const v = +m.reels_skip_rate;
+    s.skipRate = Math.round((v <= 1 ? v * 100 : v) * 10) / 10;
+  }
+  return s;
+}
+
+function upsertIgSnap(it, snap, at, isLatest) {
+  if (isLatest) {
+    const cur = it.snapshots.find((x) => x.igLatest);
+    if (cur) it.snapshots = it.snapshots.filter((x) => x !== cur);
+    insertSnapshot(it, Object.assign({ id: cur ? cur.id : uid('s'), takenAt: at || new Date().toISOString(), src: (cur && cur.src) || {}, label: 'آخرین آمار اینستاگرام', ig: true, igLatest: true }, snap));
+    return;
+  }
+  const ex = it.snapshots.find((x) => x.t === snap.t && !x.igLatest);
+  if (ex) {
+    Object.assign(ex, snap);
+    ex.ig = true;
+    return;
+  }
+  insertSnapshot(it, Object.assign({ id: uid('s'), takenAt: at || new Date().toISOString(), src: {}, ig: true }, snap));
+}
+
+function igUpdateItem(it, m) {
+  const sig = () => JSON.stringify([it.publishDate, it.publishTime, it.permalink, it.format, it.stage, it.caption, it.snapshots]);
+  const before = sig();
+  const loc = igLocal(m.timestamp);
+  if (loc) {
+    it.publishDate = loc.date;
+    it.publishTime = loc.time;
+  }
+  if (m.permalink) it.permalink = m.permalink;
+  it.format = igFormat(m);
+  if (it.stage !== 'published') it.stage = 'published';
+  if (it.order == null) it.order = nextOrder();
+  if (!it.caption && m.caption) it.caption = String(m.caption).slice(0, 5000);
+  const cps = m.checkpoints || {};
+  for (const c in cps) {
+    const cp = cps[c];
+    if (!cp || !cp.m) continue;
+    const snap = igSnap(cp.m);
+    if (!Object.keys(snap).length) continue;
+    snap.t = +c;
+    upsertIgSnap(it, snap, cp.at, false);
+  }
+  if (m.latest && m.latest.m) {
+    const snap = igSnap(m.latest.m);
+    if (Object.keys(snap).length) {
+      snap.t = Math.max(1, Math.round(m.latest.ageH || 0));
+      upsertIgSnap(it, snap, m.latest.at, true);
+    }
+  }
+  if (sig() !== before) {
+    it.updatedAt = new Date().toISOString();
+    return true;
+  }
+  return false;
+}
+
+const IG_STOP = ['کاروسل', 'ریلز', 'پست', 'سری', 'قسمت', 'اپیزود', 'نسخه', 'درباره', 'درباره‌ی', 'برای', 'رژیمی', 'رژیم', 'لاغری'];
+function _tokens(s) {
+  return String(s || '').replace(/[^\p{L}\p{N}\s\u200c]/gu, ' ').split(/\s+/).filter((w) => Array.from(w).length >= 3 && IG_STOP.indexOf(w) < 0);
+}
+
+function titleOverlap(title, caption) {
+  const t = _tokens(title);
+  if (!t.length) return 0;
+  const cap = String(caption || '');
+  return t.filter((w) => cap.indexOf(w) >= 0).length / t.length;
+}
+
+function igCandidates(m) {
+  const loc = igLocal(m.timestamp);
+  const pool = activeItems().filter((i) => isPublished(i) && !i.igId);
+  return pool.map((i) => {
+    let score = 0;
+    let dd = null;
+    if (loc && i.publishDate) {
+      dd = Math.abs(diffDaysISO(loc.date, i.publishDate));
+      score += dd === 0 ? 10 : dd === 1 ? 6 : dd <= 3 ? 2 : -6;
+    }
+    score += titleOverlap(i.title, m.caption) * 5;
+    return { it: i, score, dd };
+  }).filter((x) => x.score >= 1.5).sort((a, b) => b.score - a.score).slice(0, 4);
+}
+
+function igMediaList() {
+  return IG && Array.isArray(IG.media) ? IG.media : [];
+}
+
+function igUnlinked() {
+  const linked = new Set(S.items.filter((i) => i.igId).map((i) => i.igId));
+  return igMediaList().filter((m) => !linked.has(m.id) && S.igIgnored.indexOf(m.id) < 0);
+}
+
+function igLink(it, m) {
+  it.igId = m.id;
+  S.igIgnored = S.igIgnored.filter((x) => x !== m.id);
+  igUpdateItem(it, m);
+  it.updatedAt = new Date().toISOString();
+}
+
+function igCreate(m) {
+  const it = newItem({ title: igTitle(m), stage: 'published', series: 'other', format: igFormat(m), by: 'instagram' });
+  it.goal = null;
+  S.items.push(it);
+  igLink(it, m);
+  return it;
+}
+
+// پیوند خودکار فقط وقتی که در آن روز دقیقاً یک پست در اپ و یک پست در اینستاگرام هست
+function igApply(data) {
+  let changed = false;
+  const media = Array.isArray(data.media) ? data.media : [];
+  const byIg = new Map(S.items.filter((i) => i.igId).map((i) => [i.igId, i]));
+  for (const m of media) {
+    const it = byIg.get(m.id);
+    if (it && igUpdateItem(it, m)) changed = true;
+  }
+  const unlinked = media.filter((m) => !byIg.has(m.id) && S.igIgnored.indexOf(m.id) < 0);
+  const perDay = {};
+  unlinked.forEach((m) => {
+    const loc = igLocal(m.timestamp);
+    if (loc) perDay[loc.date] = (perDay[loc.date] || 0) + 1;
+  });
+  for (const m of unlinked) {
+    const loc = igLocal(m.timestamp);
+    if (!loc || perDay[loc.date] !== 1) continue;
+    const same = activeItems().filter((i) => isPublished(i) && !i.igId && i.publishDate === loc.date);
+    if (same.length === 1) {
+      igLink(same[0], m);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function igFollowerDelta(it, hours) {
+  const series = IG && Array.isArray(IG.followersSeries) ? IG.followersSeries : [];
+  if (!it.publishDate || series.length < 2) return null;
+  const t0 = isoToDate(it.publishDate, it.publishTime || '12:00').getTime();
+  const near = (t) => {
+    let best = null;
+    for (const p of series) {
+      const d = Math.abs(new Date(p.at).getTime() - t);
+      if (d <= 6 * HOUR_MS && (!best || d < best.d)) best = { d, n: p.n };
+    }
+    return best;
+  };
+  const a = near(t0);
+  const b = near(t0 + hours * HOUR_MS);
+  return a && b ? b.n - a.n : null;
+}
+
+async function igDispatch() {
+  if (!SYNC) throw ghError('no-sync', 'no-sync');
+  await gh('POST', repoPath('/actions/workflows/instagram.yml/dispatches'), { ref: SYNC.branch || 'main' });
+}
+
+function igStatusHtml() {
+  const st = IG_STATUS;
+  if (!st) return '';
+  const when = st.lastRunAt ? fmtWhen(dateToISO(new Date(st.lastRunAt)), pad2(new Date(st.lastRunAt).getHours()) + ':' + pad2(new Date(st.lastRunAt).getMinutes())) : '';
+  let h = '';
+  if (st.ok === false) {
+    const msg = st.errorCode === 'no-token' ? 'توکن اینستاگرام هنوز توی Secrets گیت‌هاب ثبت نشده.' :
+      st.errorCode === 'token' ? 'توکن اینستاگرام نامعتبره یا منقضی شده؛ یک توکن تازه بساز و جای IG_TOKEN بذار.' : 'آخرین دریافت خطا داد: ' + (st.error || '');
+    h += '<div class="note warn">' + ic('alert') + '<div><b>دریافت از اینستاگرام کار نکرد</b><p>' + esc(msg) + (when ? ' (' + esc(when) + ')' : '') + '</p></div></div>';
+  }
+  (st.warnings || []).slice(0, 4).forEach((w) => {
+    h += '<div class="note small">' + ic('info') + '<div>' + esc(w) + '</div></div>';
+  });
+  return h;
+}
+
+function viewInstagram() {
+  let h = '';
+  if (!SYNC) {
+    h += emptyHtml('cloud', 'اول پشتیبان خودکار رو وصل کن', 'آمار اینستاگرام از طریق همون ریپوی خصوصی گیت‌هاب میاد.', '<button type="button" class="btn primary" data-go="#/backup">وصل کردن</button>');
+    return { title: 'اینستاگرام', back: '/more', tab: 'more', html: h };
+  }
+  const media = igMediaList();
+  if (!IG && !IG_STATUS) {
+    h += '<div class="card"><div class="card-h"><b>اتصال اینستاگرام هنوز راه نیفتاده</b></div><p class="muted small">بعد از راه‌اندازی، گیت‌هاب هر ۳ ساعت آمار پست‌ها رو از API رسمی اینستاگرام می‌گیره و اپ خودش واردشون می‌کنه: تاریخ و ساعت دقیق انتشار، ویو، ریچ، لایک، کامنت، شیر، سیو، واچ‌تایم و اسکیپ‌ریت. فالوور جدید از هر ریلز رو اینستاگرام از این راه نمی‌ده.</p>' +
+      '<button type="button" class="btn primary mt8" data-go="#/ig/setup">راهنمای راه‌اندازی</button></div>';
+    return { title: 'اینستاگرام', back: '/more', tab: 'more', html: h };
+  }
+  const acc = (IG && IG.account) || (IG_STATUS && IG_STATUS.account) || {};
+  const fetched = IG && IG.fetchedAt ? new Date(IG.fetchedAt) : null;
+  h += '<div class="card"><div class="card-h"><b>' + esc(acc.username ? '@' + acc.username : 'اینستاگرام') + '</b>' +
+    (fetched ? '<span class="muted small">آخرین دریافت: ' + esc(fmtWhen(dateToISO(fetched), pad2(fetched.getHours()) + ':' + pad2(fetched.getMinutes()))) + '</span>' : '') + '</div>' +
+    '<div class="kpis three"><div class="kpi"><div class="kl">فالوور</div><div class="kv">' + fmtNum(acc.followers_count) + '</div></div>' +
+    '<div class="kpi"><div class="kl">پست‌ها</div><div class="kv">' + fmtNum(media.length) + '</div></div>' +
+    '<div class="kpi"><div class="kl">وصل‌شده</div><div class="kv">' + fmtNum(media.length - igUnlinked().length - S.igIgnored.length) + '</div></div></div>' +
+    '<div class="btn-row"><button type="button" class="btn sm" data-dispatch>' + ic('refresh') + 'الان دریافت کن</button><button type="button" class="btn sm ghost" data-go="#/ig/setup">راهنما و تنظیمات</button></div></div>';
+  h += igStatusHtml();
+  const un = igUnlinked();
+  if (un.length) {
+    h += '<section class="sec">' + secHead('پست‌هایی که توی اپ نیستن یا وصل نشدن', '<button type="button" class="link" data-all>ساخت همه</button>') +
+      '<p class="muted small">اگه پستی رو قبلاً توی اپ ثبت کردی، «وصل به…» رو بزن تا تکراری نشه. بقیه رو با «ساخت پست» اضافه کن؛ سری و برچسب‌هاشون رو بعداً تعیین کن یا از Claude بخواه پیشنهاد بده.</p><div class="cards">' +
+      un.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || '')).map((m) => {
+        const loc = igLocal(m.timestamp);
+        const cands = igCandidates(m).slice(0, 2);
+        return '<article class="icard ig-card" data-ig="' + esc(m.id) + '"><div class="icard-top">' + badgeHtml(nameOf(FORMATS, igFormat(m)) || 'پست') +
+          '<span class="icard-date">' + (loc ? esc(fmtWhenG(loc.date, loc.time)) : '') + '</span></div><h3>' + esc(igTitle(m)) + '</h3>' +
+          (m.latest && m.latest.m ? '<div class="stats-row">' + (m.latest.m.views != null ? statMini(fmtCompact(+m.latest.m.views), 'ویو') : '') + (m.latest.m.reach != null ? statMini(fmtCompact(+m.latest.m.reach), 'ریچ') : '') + (m.latest.m.saved != null ? statMini(fmtNum(+m.latest.m.saved), 'سیو') : '') + '</div>' : '') +
+          '<div class="ig-act">' + cands.map((c) => '<button type="button" class="btn sm" data-link="' + esc(c.it.id) + '">' + ic('check') + 'وصل به «' + esc(Array.from(c.it.title).slice(0, 26).join('')) + '»</button>').join('') +
+          '<button type="button" class="btn sm" data-pick>وصل به…</button><button type="button" class="btn sm" data-create>' + ic('plus') + 'ساخت پست</button><button type="button" class="btn sm ghost" data-ignore>نادیده</button></div></article>';
+      }).join('') + '</div></section>';
+  } else if (media.length) {
+    h += '<p class="muted small center mt16">همه‌ی پست‌های اینستاگرام به پست‌های اپ وصل شدن.</p>';
+  }
+  const series = IG && Array.isArray(IG.followersSeries) ? IG.followersSeries : [];
+  if (series.length > 1) {
+    const byDay = {};
+    series.forEach((p) => { byDay[dateToISO(new Date(p.at))] = p.n; });
+    const days = Object.keys(byDay).sort().slice(-15);
+    const rows = [];
+    for (let i = days.length - 1; i > 0; i--) rows.push({ d: days[i], n: byDay[days[i]], delta: byDay[days[i]] - byDay[days[i - 1]] });
+    if (rows.length) {
+      h += '<section class="sec">' + secHead('فالوورهای پیج', '<span class="muted small">آخر هر روز</span>') + '<div class="list">' + rows.map((r) =>
+        '<div class="row static"><span class="rt"><b>' + esc(fmtJShort(r.d)) + '</b></span><span class="rank-v">' + fmtNum(r.n) + '</span><span class="fdelta ' + (r.delta > 0 ? 'good' : r.delta < 0 ? 'bad' : '') + '">' + (r.delta > 0 ? '+' : '') + fmtNum(r.delta) + '</span></div>').join('') + '</div></section>';
+    }
+  }
+  if (S.igIgnored.length) h += '<div class="center mt16"><button type="button" class="link" data-unignore>نمایش دوباره‌ی ' + faNum(S.igIgnored.length) + ' پست نادیده‌گرفته</button></div>';
+  return {
+    title: 'اینستاگرام',
+    back: '/more',
+    tab: 'more',
+    html: h,
+    mount: (root) => {
+      root.addEventListener('click', async (e) => {
+        if (e.target.closest('[data-dispatch]')) {
+          try {
+            await igDispatch();
+            toast('درخواست فرستاده شد؛ چند دقیقه بعد آمار تازه میاد');
+          } catch (err) {
+            toast(err.status === 404 ? 'فایل زمان‌بندی اینستاگرام توی ریپو نیست؛ راهنما رو ببین' : syncErrorText(err));
+          }
+          return;
+        }
+        if (e.target.closest('[data-all]')) {
+          const list = igUnlinked();
+          const ok = await confirmBox({ title: 'ساخت ' + faNum(list.length) + ' پست؟', text: 'برای هر پست اینستاگرامی که وصل نشده، یک پست تازه با سری «سایر» ساخته می‌شه. اگه بعضی‌هاشون قبلاً توی اپ هستن، اول اون‌ها رو با «وصل به…» وصل کن.', ok: 'ساخت همه' });
+          if (!ok) return;
+          await keepSafetyCopy();
+          list.forEach(igCreate);
+          save();
+          toast(faNum(list.length) + ' پست ساخته شد');
+          rerender();
+          return;
+        }
+        if (e.target.closest('[data-unignore]')) {
+          S.igIgnored = [];
+          save();
+          rerender();
+          return;
+        }
+        const card = e.target.closest('[data-ig]');
+        if (!card) return;
+        const m = igMediaList().find((x) => x.id === card.dataset.ig);
+        if (!m) return;
+        const ln = e.target.closest('[data-link]');
+        if (ln) {
+          const it = itemById(ln.dataset.link);
+          if (it) {
+            igLink(it, m);
+            save();
+            toast('به «' + it.title + '» وصل شد');
+            rerender();
+          }
+          return;
+        }
+        if (e.target.closest('[data-pick]')) {
+          const pool = activeItems().filter((i) => !i.igId).sort((a, b) => pubKey(b) - pubKey(a));
+          const v = await pickOne({ title: 'وصل به کدوم پست؟', options: pool.map((i) => ({ value: i.id, label: i.title, sub: (isPublished(i) ? (i.publishDate ? fmtJ(i.publishDate) : 'منتشرشده، بدون تاریخ') : stageName(i.stage)), ci: seriesById(i.series).ci })) });
+          if (!v) return;
+          const it = itemById(v);
+          igLink(it, m);
+          save();
+          toast('به «' + it.title + '» وصل شد');
+          rerender();
+          return;
+        }
+        if (e.target.closest('[data-create]')) {
+          const it = igCreate(m);
+          save();
+          toast('پست «' + it.title + '» ساخته شد');
+          rerender();
+          return;
+        }
+        if (e.target.closest('[data-ignore]')) {
+          if (S.igIgnored.indexOf(m.id) < 0) S.igIgnored.push(m.id);
+          save();
+          rerender();
+        }
+      });
+    },
+  };
+}
+
+function igSetupStep(n, title, body, done) {
+  return '<li class="setup-step' + (done === true ? ' ok' : '') + '"><div class="ss-h"><span class="ss-n">' + (done === true ? ic('check') : faNum(n)) + '</span><b>' + title + '</b></div><div class="ss-b">' + body + '</div></li>';
+}
+
+function viewIgSetup() {
+  const repoUrl = SYNC ? 'https://github.com/' + SYNC.owner + '/' + SYNC.repo : '';
+  const wfUrl = SYNC ? repoUrl + '/new/' + encodeURIComponent(SYNC.branch || 'main') + '?filename=' + encodeURIComponent('.github/workflows/instagram.yml') + '&value=' + encodeURIComponent(REPO_WORKFLOW) : '#';
+  const h = '<p class="muted small">یک بار راه‌اندازی می‌شه و بعدش همه‌چیز خودکاره. قدم ۱ رو باید با VPN انجام بدی.</p><ol class="setup">' +
+    igSetupStep(1, 'ساخت اپ در Meta و گرفتن توکن اینستاگرام',
+      '<p>متا ایران رو رسماً پشتیبانی نمی‌کنه؛ برای ساخت اپ توسعه‌دهنده به یک حساب فیسبوک نیاز داری و ممکنه متا حساب توسعه‌دهنده رو محدود کنه.</p><ol class="mini-steps">' +
+      '<li>developers.facebook.com/apps رو باز کن و «Create app» رو بزن. نوع اپ رو «Business» انتخاب کن.</li>' +
+      '<li>محصول «Instagram» رو اضافه کن و برو به «API setup with Instagram business login».</li>' +
+      '<li>توی «Generate access tokens»، حساب DR.BAZRAFSHAN.FITLIFE رو اضافه کن، وارد اینستاگرام شو و توکن رو کپی کن.</li></ol>' +
+      '<a class="btn sm" href="https://developers.facebook.com/apps" target="_blank" rel="noopener">باز کردن Meta for Developers</a>') +
+    igSetupStep(2, 'ثبت دو Secret در ریپوی داده‌ها',
+      '<p>صفحه‌ی Secrets رو باز کن و دو بار «New repository secret» بزن:</p><ul class="mini-steps"><li><code>IG_TOKEN</code>: توکنی که از متا گرفتی</li><li><code>STUDIO_PAT</code>: همون توکن گیت‌هابی که توی اپ گذاشتی (برای تمدید خودکار توکن اینستاگرام)</li></ul>' +
+      '<div class="btn-row"><a class="btn sm" href="' + esc(repoUrl + '/settings/secrets/actions/new') + '" target="_blank" rel="noopener">باز کردن Secrets</a><button type="button" class="btn sm ghost" data-copytoken>' + ic('copy') + 'کپی توکن گیت‌هاب</button></div><div class="ss-st" data-st-secrets></div>') +
+    igSetupStep(3, 'نصب فایل‌های دریافت خودکار',
+      '<p>اسکریپت با یک لمس از همین‌جا نصب می‌شه. فایل زمان‌بندی رو گیت‌هاب فقط از صفحه‌ی خودش قبول می‌کنه: دکمه‌ی دوم رو بزن و توی صفحه‌ای که باز می‌شه «Commit changes» رو بزن.</p>' +
+      '<div class="btn-row"><button type="button" class="btn sm" data-install>' + ic('download') + 'نصب اسکریپت</button><a class="btn sm" href="' + esc(wfUrl) + '" target="_blank" rel="noopener">ساخت فایل زمان‌بندی</a></div><div class="ss-st" data-st-files></div>') +
+    igSetupStep(4, 'اولین دریافت',
+      '<p>بعد از قدم‌های بالا این دکمه رو بزن. چند دقیقه بعد، آمار توی بخش اینستاگرام میاد و از اون به بعد هر ۳ ساعت خودکار به‌روز می‌شه.</p><button type="button" class="btn sm primary" data-dispatch>' + ic('refresh') + 'اولین دریافت</button>') +
+    '</ol>';
+  return {
+    title: 'راه‌اندازی اینستاگرام',
+    back: '/ig',
+    tab: 'more',
+    html: SYNC ? h : emptyHtml('cloud', 'اول پشتیبان خودکار رو وصل کن', '', '<button type="button" class="btn primary" data-go="#/backup">وصل کردن</button>'),
+    mount: async (root) => {
+      if (!SYNC) return;
+      const check = async () => {
+        const stS = root.querySelector('[data-st-secrets]');
+        const stF = root.querySelector('[data-st-files]');
+        try {
+          const sec = await gh('GET', repoPath('/actions/secrets?per_page=50'));
+          const names = (sec && sec.secrets ? sec.secrets : []).map((x) => x.name);
+          stS.innerHTML = ['IG_TOKEN', 'STUDIO_PAT'].map((n) => '<span class="' + (names.indexOf(n) >= 0 ? 'ok-t' : 'no-t') + '">' + (names.indexOf(n) >= 0 ? '✓ ' : '✗ ') + n + '</span>').join('');
+        } catch (e) {
+          stS.textContent = '';
+        }
+        try {
+          const a = await ghStat('scripts/instagram-sync.mjs');
+          const b = await ghStat('.github/workflows/instagram.yml');
+          stF.innerHTML = '<span class="' + (a ? 'ok-t' : 'no-t') + '">' + (a ? '✓' : '✗') + ' اسکریپت</span><span class="' + (b ? 'ok-t' : 'no-t') + '">' + (b ? '✓' : '✗') + ' فایل زمان‌بندی</span>';
+        } catch (e) {
+          stF.textContent = '';
+        }
+      };
+      check();
+      root.addEventListener('click', async (e) => {
+        if (e.target.closest('[data-copytoken]')) { copyText(SYNC.token, 'توکن کپی شد؛ به‌عنوان STUDIO_PAT بذارش'); return; }
+        if (e.target.closest('[data-install]')) {
+          try {
+            const st = await ghStat('scripts/instagram-sync.mjs');
+            await ghWrite('scripts/instagram-sync.mjs', REPO_IG_SCRIPT, st ? st.sha : undefined, 'اسکریپت دریافت آمار اینستاگرام');
+            toast('اسکریپت نصب شد');
+            check();
+          } catch (err) {
+            toast(syncErrorText(err));
+          }
+          return;
+        }
+        if (e.target.closest('[data-dispatch]')) {
+          try {
+            await igDispatch();
+            toast('درخواست فرستاده شد؛ چند دقیقه بعد بخش اینستاگرام رو ببین');
+          } catch (err) {
+            toast(err.status === 404 ? 'فایل زمان‌بندی هنوز ساخته نشده' : syncErrorText(err));
+          }
+        }
+      });
+    },
+  };
+}
+
 /* ---------- مسیریابی و پوسته‌ی اپ ---------- */
 let _navDepth = 0;
 let _cur = null;
@@ -3770,6 +5799,11 @@ const ROUTES = [
   [/^\/settings\/list\/(\w+)$/, (m) => viewListSettings(m[1])],
   [/^\/settings\/checklist$/, () => viewChecklistSettings()],
   [/^\/settings\/prompts$/, () => viewPromptSettings()],
+  [/^\/claude$/, () => viewClaude()],
+  [/^\/claude\/(.+)$/, (m) => viewClaudeEntry(decodeURIComponent(m[1]))],
+  [/^\/ig$/, () => viewInstagram()],
+  [/^\/ig\/setup$/, () => viewIgSetup()],
+  [/^\/sync\/history$/, () => viewSyncHistory()],
 ];
 
 function parseHash() {
@@ -3808,7 +5842,8 @@ function render(keepScroll) {
   tb.innerHTML =
     (v.back ? '<button type="button" class="icon-btn" data-nav-back aria-label="برگشت">' + ic('back') + '</button>' : '') +
     '<div class="tb-t"><h1>' + esc(v.title || '') + '</h1>' + (v.sub ? '<div class="tb-sub">' + esc(v.sub) + '</div>' : '') + '</div>' +
-    (v.actions || []).map((a, i) => '<button type="button" class="icon-btn" data-tb="' + i + '" aria-label="' + esc(a.label) + '">' + ic(a.icon) + '</button>').join('');
+    (v.actions || []).map((a, i) => '<button type="button" class="icon-btn' + (a.sync ? ' sync-btn' : '') + '" data-tb="' + i + '" aria-label="' + esc(a.label) + '" title="' + esc(a.label) + '">' + ic(a.icon) +
+      (a.sync ? '<span class="syncdot" data-syncdot data-state="' + _syncState + '"></span>' : '') + '</button>').join('');
 
   const main = document.getElementById('main');
   const view = document.createElement('div');
@@ -3911,6 +5946,12 @@ document.addEventListener('keydown', (e) => {
 window.addEventListener('scroll', () => {
   document.getElementById('topbar').classList.toggle('scrolled', window.scrollY > 4);
 }, { passive: true });
+
+/* ---------- فایل‌های ریپوی داده‌ها (ساخته‌شده از پوشه‌ی data-repo) ---------- */
+const REPO_README = "# داده‌های استودیو محتوا\n\nاین ریپو **خصوصیه** و داده‌های اپ «استودیو محتوا» اینجا نگه داشته می‌شه. هیچ‌وقت Public نکنش.\n\n| فایل یا پوشه | چیه |\n|---|---|\n| `state.json` | همه‌ی داده‌های اپ. اپ بعد از هر تغییر خودش اینجا ذخیره‌شون می‌کنه. |\n| تاریخچه‌ی `state.json` | هر ذخیره یک نسخه‌ست. از داخل اپ: بیشتر ← پشتیبان‌گیری ← تاریخچه‌ی نسخه‌ها. |\n| `inbox/` | تحلیل‌ها و پیشنهادهای Claude. اپ خودش می‌خونه‌شون. |\n| `instagram/` | آماری که گیت‌هاب هر ۳ ساعت از اینستاگرام می‌گیره. |\n| `scripts/`، `.github/workflows/` | برنامه‌ی دریافت آمار اینستاگرام. |\n| `CLAUDE.md` | راهنمای Claude برای خوندن داده‌ها و نوشتن تحلیل. |\n\nدستی چیزی رو اینجا عوض نکن؛ همه‌ی تغییرها از داخل اپ انجام می‌شه.\n\n## Secrets اینستاگرام\n\nSettings ← Secrets and variables ← Actions ← New repository secret:\n\n- `IG_TOKEN`: توکن اینستاگرام که از Meta for Developers گرفتی.\n- `STUDIO_PAT`: همون توکن گیت‌هابی که توی اپ گذاشتی. باهاش توکن اینستاگرام هر هفته خودکار تمدید می‌شه.\n\nراهنمای قدم‌به‌قدم داخل خود اپه: بیشتر ← اینستاگرام ← راهنما و تنظیمات.\n\n## اگه گوشی گم شد\n\nتوکن گیت‌هاب اپ رو از github.com/settings/personal-access-tokens پاک کن و یک توکن تازه بساز.\n";
+const REPO_CLAUDE = "# studio-data — instructions for Claude\n\nThis private repo holds the data of «استودیو محتوا», Dr. Mohammad Bazrafshan's Instagram content app\n(PWA: https://mbx3.github.io/content-studio/, code: mbx3/content-studio). He talks to you in Persian,\nin the Claude Project «کار و تولید محتوا کلینیک».\n\nThree writers, three areas. Stay in yours:\n\n| Path | Written by | Claude may |\n|---|---|---|\n| `state.json` | the app (auto-backup after every change) | read only |\n| `instagram/media.json`, `instagram/status.json` | GitHub Actions (`.github/workflows/instagram.yml`, `scripts/instagram-sync.mjs`) every 3 hours | read only |\n| `inbox/*.json` | **Claude** | add new files only |\n\nNever edit `state.json`: the app owns it and would overwrite or merge your edit unpredictably.\nEvery change you want in the app goes through an inbox suggestion that the user applies with one tap.\nNever read, print or commit secrets (`IG_TOKEN`, `STUDIO_PAT`).\n\n## Answering a request\n\n1. `add_repo mbx3/studio-data` with push access, clone it, load `state.json` (and `instagram/media.json` if present) with Python.\n2. Open questions the user asked from the app are in `data.questions` with `status: \"open\"`; the chat message quotes the question id (`q-…`).\n3. Read `data.inbox[*].decisions` first: it shows which of your earlier suggestions he applied or rejected. Don't repeat rejected ones.\n4. Compute with code, never by eye. Report the number of posts behind every comparison. With small groups (n ≤ 3), call it a hypothesis worth a Trial Reel, not a finding.\n5. Write **one new file** `inbox/YYYYMMDD-HHMM-<slug>.json` (UTC time) using the schema below. Set `answers` to the question id when answering one.\n6. Commit with message `تحلیل Claude: <title>`, `git pull --rebase`, push.\n7. In chat, give a short summary and tell him: «توی اپ: بیشتر ← تحلیل‌های Claude ← بروزرسانی».\n\nIf the repo isn't reachable (GitHub App not installed), produce the same JSON as a file in chat; he imports it from «وارد کردن از فایل».\n\n## Data model (`state.json` → `data`)\n\n`items[]` — posts and ideas:\n`id, title, series, stage (idea|script|shoot|edit|ready|published), goal (attract|trust|sell|null), format (reel|carousel|post|story), pubType (normal|trial|collab|collab2), style, hookType, ctaType, source, concerns[], location, priority (high|mid|low), notes, plannedDate, plannedTime, publishDate (YYYY-MM-DD, Tehran local), publishTime (HH:MM, or null = unknown), durationSec, script{hook,retention,body,cta,shots}, cover{text,notes}, caption, sources[{id,text,verified}], checklist{ruleId:true}, snapshots[], archived, igId, permalink, createdAt, updatedAt`\n\n`items[].snapshots[]` — one stats reading:\n`id, t (hours after publishing; null = unknown), label, takenAt, views, reach (Accounts reached: the denominator), follows, profileVisits, likes, comments, shares, saves, reposts, likesPct, commentsPct, sharesPct, savesPct, repostsPct (% of reach, as Instagram shows them), skipRate (%), avgWatch (seconds), followersPct (% of viewers who already followed), age2554, age1317 (%), src{reels, explore, feed, stories, profile, other} (% of views), note, ig (true = from the Instagram API), igLatest (the rolling latest API reading), by`\n\nOther collections:\n- `leads[]`: `date, type (dm|booking|visit|online), count, center, itemId, channel` — patient funnel, numbers only, no patient data.\n- `learnings[]`: `text, status (hyp|test|ok|no), category, itemIds[], date`.\n- `snippets[]`: `kind (hook|cta|retention|cover), text, series, itemId, used, result (good|bad|null)`.\n- `questions[]`: `id, text, itemId, status (open|answered), answerKey, createdAt`.\n- `inbox{key: {title, createdAt, report, suggestions, decisions{suggestionId: {d: applied|rejected, at, r}}}}`.\n- `settings.series[]`: `id, name, short`. Defaults: `qa` «۳۰ ثانیه، یک سوال», `sci` «علم رژیم», `fun` طنز و سرگرمی, `self` از خودم, `cook` آشپزخونه, `clinic` کولب کلینیک, `other` سایر.\n- `settings.lists`: `sources, concerns, styles, hookTypes, ctaTypes, locations, centers, channels, lcats` (learning categories).\n- `settings.checklist[]`, `settings.checkpoints` (hours, default 24/72/168/720), `settings.profile`, `settings.templates`.\n- `tomb{id: deletedAt}`: deleted records; ignore those ids.\n\n## Metrics (same definitions as the app)\n\n- Follow conversion = follows ÷ reach × 100. The page's key growth metric.\n- Save rate = savesPct, else saves ÷ reach × 100. Share and comment rates likewise.\n- Retention = avgWatch ÷ durationSec. Profile visits per 1,000 reach. Non-follower share = 100 − followersPct.\n- \"Latest\" = the last snapshot that has the value. Comparing at a fixed checkpoint (`t == 72` etc.) is fairer between old and new posts.\n- Exclude `pubType` collab/collab2 from page baselines by default: their views come from the clinic's page.\n- The Instagram API gives no follows or profile visits for Reels; those exist only where he entered them by hand.\n\n## Inbox file schema\n\n```json\n{\n  \"kind\": \"studio-inbox\",\n  \"version\": 1,\n  \"id\": \"20261027-0930-weekly\",\n  \"createdAt\": \"2026-10-27T09:30:00Z\",\n  \"title\": \"تحلیل هفتگی\",\n  \"answers\": \"q-xxxx\",\n  \"report\": \"## عنوان\\nمتن، - فهرست، 1. فهرست شماره‌دار، **پررنگ**، | جدول |، > نقل‌قول\",\n  \"suggestions\": [\n    { \"id\": \"s1\", \"type\": \"learning\", \"text\": \"…\", \"status\": \"hyp\", \"category\": \"فرمت\", \"itemIds\": [\"…\"], \"why\": \"…\" }\n  ]\n}\n```\n\nSuggestion types (every suggestion may carry `why`):\n\n| type | fields |\n|---|---|\n| `learning` | `text, status (hyp|test|ok|no), category?, itemIds?` |\n| `idea` | `title, series, goal?, notes?, concerns?, format?, hook?, source?, priority?, style?` |\n| `snippet` | `kind (hook|cta|retention|cover), text, series?, itemId?` |\n| `update` | `itemId, set{series, goal, format, pubType, style, hookType, ctaType, source, location, concerns, durationSec, publishDate, publishTime, title, caption, priority, stage}` |\n| `note` | `itemId, text` (appended to the post's notes) |\n| `snapshot` | `itemId, snapshot{t or label, views, reach, follows, …, src{…}}, durationSec?` |\n| `post` | `item{title, series, publishDate, publishTime?, pubType, format, durationSec?, style?, hookType?, ctaType?, goal?, caption?, notes?}, snapshots[]` |\n| `checklist` | `text` (a new pre-publish rule) |\n\nReuse existing list values (`settings.lists`) for style, hookType, ctaType, source, location, concerns and category whenever one fits; a new value is added to the list when applied.\nKeep `report` readable on a phone: short sections, small tables, no wall of text.\n\n## Insights screenshots\n\nWhen he sends screenshots of Instagram Insights, match each to a post (title or date → `itemId`), read the numbers exactly and skip anything unreadable.\nMap: Accounts reached → `reach`; Views → `views`; the percentages beside interactions → `*Pct`; average watch time → `avgWatch` in seconds; skip rate → `skipRate`; follows → `follows`; traffic sources → `src`; follower share → `followersPct`.\nSet `t` to the hours since publishing when known, else a `label`. Write `snapshot` suggestions, or `post` suggestions for posts the app doesn't have.\n\n## Voice and values\n\nPersian, conversational, concrete, tied to his own past numbers and his audience (adults 25–54 losing weight with diet or injections).\nScientific accuracy first, uncertainty disclosed, no patient shaming, no drug brand names in his own text.\nJudge ideas by whether they grow the page and bring patients (dm/booking leads), not by views alone.\n";
+const REPO_WORKFLOW = "name: instagram\non:\n  schedule:\n    - cron: '17 */3 * * *'\n  workflow_dispatch:\npermissions:\n  contents: write\nconcurrency:\n  group: instagram\n  cancel-in-progress: false\njobs:\n  fetch:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - name: Fetch Instagram data\n        env:\n          IG_TOKEN: ${{ secrets.IG_TOKEN }}\n          STUDIO_PAT: ${{ secrets.STUDIO_PAT }}\n        run: node scripts/instagram-sync.mjs\n      - name: Commit\n        run: |\n          git config user.name \"studio-bot\"\n          git config user.email \"github-actions[bot]@users.noreply.github.com\"\n          git add instagram\n          if git diff --cached --quiet; then exit 0; fi\n          git commit -m \"instagram: $(date -u +%Y-%m-%dT%H:%MZ)\"\n          for i in 1 2 3 4 5; do\n            git pull --rebase origin \"${GITHUB_REF_NAME}\" && git push origin \"HEAD:${GITHUB_REF_NAME}\" && exit 0\n            sleep $((i * 5))\n          done\n          exit 1\n";
+const REPO_IG_SCRIPT = "// دریافت آمار اینستاگرام برای «استودیو محتوا»\n// در GitHub Actions اجرا می‌شود (فایل .github/workflows/instagram.yml) و خروجی را در پوشه‌ی instagram/ می‌نویسد.\n// فقط از ماژول‌های خود Node استفاده می‌کند. Secrets: IG_TOKEN (اجباری)، STUDIO_PAT (برای تمدید خودکار توکن).\nimport fs from 'node:fs';\nimport path from 'node:path';\nimport { spawnSync } from 'node:child_process';\n\nconst TOKEN = (process.env.IG_TOKEN || '').trim();\nconst PAT = (process.env.STUDIO_PAT || '').trim();\nconst REPO = process.env.GITHUB_REPOSITORY || '';\nconst API_BASE = (process.env.IG_API_BASE || 'https://graph.instagram.com').replace(/\\/+$/, '');\nconst VERSION = process.env.IG_API_VERSION || 'v25.0';\nconst OUT = process.env.STUDIO_OUT || 'instagram';\nconst NOW = new Date(process.env.STUDIO_NOW || Date.now());\nconst HOUR = 3600000;\n\nconst CHECKPOINTS = [24, 72, 168, 720];\nconst WINDOW = { 24: 12, 72: 24, 168: 48, 720: 120 }; // اگر دیرتر از این برسیم، آن مقطع ثبت نمی‌شود\nconst RECENT_H = 45 * 24; // پست‌های تازه‌تر از این، هر بار به‌روز می‌شوند\nconst OLD_REFRESH_H = 7 * 24; // پست‌های قدیمی هفته‌ای یک بار\nconst MAX_MEDIA = 600;\n\nconst REELS_METRICS = ['views', 'reach', 'likes', 'comments', 'shares', 'saved', 'reposts', 'total_interactions', 'ig_reels_avg_watch_time', 'ig_reels_video_view_total_time', 'reels_skip_rate'];\nconst FEED_METRICS = ['views', 'reach', 'likes', 'comments', 'shares', 'saved', 'reposts', 'total_interactions', 'follows', 'profile_visits'];\n\nclass ApiError extends Error {\n  constructor(message, code, status) {\n    super(message);\n    this.code = code;\n    this.status = status;\n  }\n}\n\nconst sleep = (ms) => new Promise((r) => setTimeout(r, ms));\nconst round1 = (n) => Math.round(n * 10) / 10;\nconst isToken = (e) => e && (e.code === 190 || e.code === 102);\nconst isRate = (e) => e && [4, 17, 32, 613].includes(e.code);\n\nfunction readJSON(file, fallback) {\n  try {\n    return JSON.parse(fs.readFileSync(file, 'utf8'));\n  } catch (e) {\n    return fallback;\n  }\n}\n\nfunction writeJSON(file, data) {\n  fs.mkdirSync(path.dirname(file), { recursive: true });\n  fs.writeFileSync(file, JSON.stringify(data, null, 1) + '\\n');\n}\n\nfunction normTs(ts) {\n  return String(ts || '').replace(/([+-]\\d\\d)(\\d\\d)$/, '$1:$2');\n}\n\nasync function getJSON(url) {\n  for (let attempt = 0; attempt < 3; attempt++) {\n    let res;\n    try {\n      res = await fetch(url, { headers: { Accept: 'application/json' } });\n    } catch (e) {\n      if (attempt === 2) throw new ApiError('network: ' + e.message, 'network');\n      await sleep(2000 * (attempt + 1));\n      continue;\n    }\n    const text = await res.text();\n    let data = null;\n    try { data = JSON.parse(text); } catch (e) { data = null; }\n    if (res.ok && data && !data.error) return data;\n    if (res.status >= 500 && attempt < 2) {\n      await sleep(2000 * (attempt + 1));\n      continue;\n    }\n    const err = data && data.error ? data.error : { message: 'HTTP ' + res.status };\n    throw new ApiError(err.message || 'error', err.code, res.status);\n  }\n  throw new ApiError('unreachable', 'network');\n}\n\nfunction apiUrl(p, params) {\n  const url = new URL(API_BASE + '/' + VERSION + p);\n  for (const [k, v] of Object.entries(params || {})) url.searchParams.set(k, String(v));\n  url.searchParams.set('access_token', TOKEN);\n  return url.toString();\n}\n\nconst api = (p, params) => getJSON(apiUrl(p, params));\n\nasync function listMedia() {\n  const fields = 'id,caption,media_type,media_product_type,permalink,timestamp,thumbnail_url,like_count,comments_count';\n  let page = await api('/me/media', { fields, limit: 50 });\n  const out = [...(page.data || [])];\n  while (page.paging && page.paging.next && out.length < MAX_MEDIA) {\n    page = await getJSON(page.paging.next);\n    out.push(...(page.data || []));\n  }\n  return out;\n}\n\nfunction parseInsights(d) {\n  const out = {};\n  for (const row of (d && d.data) || []) {\n    let v = null;\n    if (Array.isArray(row.values) && row.values.length) v = row.values[0].value;\n    else if (row.total_value) v = row.total_value.value;\n    if (typeof v === 'number') out[row.name] = v;\n  }\n  return out;\n}\n\n// شاخصی که برای چند پست خطا بدهد و برای هیچ پستی جواب ندهد، تا یک هفته درخواست نمی‌شود\nconst failCount = {};\nconst okMetric = {};\nlet knownSkip = {};\nconst skipMetric = (kind, m) => (knownSkip[kind] || []).includes(m) || (failCount[kind + ':' + m] || 0) >= 3;\n\nasync function mediaInsights(m) {\n  const kind = m.media_product_type === 'REELS' ? 'REELS' : 'FEED';\n  const want = (kind === 'REELS' ? REELS_METRICS : FEED_METRICS).filter((x) => !skipMetric(kind, x));\n  if (!want.length) return {};\n  try {\n    const res = parseInsights(await api('/' + m.id + '/insights', { metric: want.join(',') }));\n    for (const k of Object.keys(res)) okMetric[kind + ':' + k] = true;\n    return res;\n  } catch (e) {\n    if (isToken(e) || isRate(e) || e.code === 'network') throw e;\n  }\n  const out = {};\n  for (const metric of want) {\n    try {\n      Object.assign(out, parseInsights(await api('/' + m.id + '/insights', { metric })));\n      okMetric[kind + ':' + metric] = true;\n    } catch (e) {\n      if (isToken(e) || isRate(e) || e.code === 'network') throw e;\n      failCount[kind + ':' + metric] = (failCount[kind + ':' + metric] || 0) + 1;\n    }\n  }\n  return out;\n}\n\nfunction dueCheckpoint(ageH, cps) {\n  return CHECKPOINTS.some((c) => ageH >= c && ageH < c + WINDOW[c] && !cps[c]);\n}\n\n// روزهای تقویمی به وقت تهران (UTC+03:30)\nconst TEHRAN = 3.5 * HOUR;\nfunction tehranDay(t) {\n  return new Date(t + TEHRAN).toISOString().slice(0, 10);\n}\nfunction tehranDayStart(dayStr) {\n  return Date.parse(dayStr + 'T00:00:00Z') - TEHRAN;\n}\n\nasync function fillDailyFollows(daily) {\n  const today = tehranDay(NOW.getTime());\n  const days = [];\n  const back = Object.keys(daily).length ? 4 : 30;\n  for (let i = back; i >= 1; i--) days.push(tehranDay(NOW.getTime() - i * 24 * HOUR));\n  days.push(today);\n  for (const day of days) {\n    const since = Math.floor(tehranDayStart(day) / 1000);\n    const until = Math.min(Math.floor(NOW.getTime() / 1000), since + 86400);\n    if (until <= since) continue;\n    const d = await api('/me/insights', { metric: 'follows_and_unfollows', period: 'day', metric_type: 'total_value', breakdown: 'follow_type', since, until });\n    const row = (d.data || [])[0];\n    if (!row || !row.total_value) continue;\n    const rec = { total: row.total_value.value != null ? row.total_value.value : null };\n    for (const b of row.total_value.breakdowns || []) {\n      for (const r of b.results || []) rec[(r.dimension_values || []).join('/') || 'value'] = r.value;\n    }\n    daily[day] = rec;\n  }\n  const keys = Object.keys(daily).sort();\n  while (keys.length > 400) delete daily[keys.shift()];\n}\n\nasync function maybeRefreshToken(status) {\n  if (!TOKEN || status.errorCode === 'token') return;\n  if (!status.tokenSeenAt) status.tokenSeenAt = NOW.toISOString();\n  const last = status.tokenRefreshedAt ? Date.parse(status.tokenRefreshedAt) : 0;\n  if (NOW.getTime() - last < 6 * 24 * HOUR) return;\n  if (!PAT) {\n    status.warnings.push('برای تمدید خودکار توکن اینستاگرام، STUDIO_PAT رو هم توی Secrets بذار؛ وگرنه توکن حدود ۶۰ روز بعد از ساختنش منقضی می‌شه.');\n    return;\n  }\n  if (!last && NOW.getTime() - Date.parse(status.tokenSeenAt) < 25 * HOUR) return; // توکن باید دست‌کم ۲۴ ساعت عمر داشته باشد\n  try {\n    const url = new URL(API_BASE + '/refresh_access_token');\n    url.searchParams.set('grant_type', 'ig_refresh_token');\n    url.searchParams.set('access_token', TOKEN);\n    const d = await getJSON(url.toString());\n    if (!d.access_token) throw new Error('پاسخ بدون توکن بود');\n    const r = spawnSync('gh', ['secret', 'set', 'IG_TOKEN', '--repo', REPO], { input: d.access_token, env: Object.assign({}, process.env, { GH_TOKEN: PAT }), encoding: 'utf8' });\n    if (r.status !== 0) throw new Error('ذخیره‌ی Secret نشد: ' + String(r.stderr || r.error || '').slice(0, 200));\n    status.tokenRefreshedAt = NOW.toISOString();\n    status.tokenExpiresAt = new Date(NOW.getTime() + (Number(d.expires_in) || 5184000) * 1000).toISOString();\n  } catch (e) {\n    status.warnings.push('تمدید توکن اینستاگرام انجام نشد: ' + e.message);\n  }\n}\n\nasync function main() {\n  const status = readJSON(path.join(OUT, 'status.json'), {});\n  const prev = readJSON(path.join(OUT, 'media.json'), {});\n  status.kind = 'studio-instagram-status';\n  status.lastRunAt = NOW.toISOString();\n  status.apiVersion = VERSION;\n  status.warnings = [];\n  const skipFresh = status.skipMetrics && status.skipMetrics.at && NOW.getTime() - Date.parse(status.skipMetrics.at) < 7 * 24 * HOUR;\n  knownSkip = skipFresh ? status.skipMetrics : {};\n  if (!TOKEN) {\n    Object.assign(status, { ok: false, errorCode: 'no-token', error: 'IG_TOKEN در Secrets ریپو نیست' });\n    writeJSON(path.join(OUT, 'status.json'), status);\n    console.log('IG_TOKEN is not set; nothing to do.');\n    return;\n  }\n  try {\n    const me = await api('/me', { fields: 'user_id,username,account_type,followers_count,follows_count,media_count' });\n    const media = await listMedia();\n    const prevById = new Map((prev.media || []).map((m) => [m.id, m]));\n    const out = [];\n    let fetched = 0;\n    let failed = 0;\n    let rateHit = false;\n    for (const m of media) {\n      const old = prevById.get(m.id) || {};\n      const ts = Date.parse(normTs(m.timestamp));\n      const ageH = (NOW.getTime() - ts) / HOUR;\n      const rec = {\n        id: m.id, caption: m.caption || '', media_type: m.media_type, media_product_type: m.media_product_type, permalink: m.permalink,\n        timestamp: m.timestamp, thumbnail_url: m.thumbnail_url || null, like_count: m.like_count, comments_count: m.comments_count,\n        checkpoints: old.checkpoints || {}, latest: old.latest || null,\n      };\n      const lastAt = old.latest ? Date.parse(old.latest.at) : 0;\n      const due = !rateHit && m.media_product_type !== 'STORY' && Number.isFinite(ageH) &&\n        (ageH < RECENT_H || !old.latest || (NOW.getTime() - lastAt) / HOUR >= OLD_REFRESH_H || dueCheckpoint(ageH, rec.checkpoints));\n      if (due) {\n        try {\n          const metrics = await mediaInsights(m);\n          if (Object.keys(metrics).length) {\n            const snap = { at: NOW.toISOString(), ageH: round1(ageH), m: metrics };\n            rec.latest = snap;\n            for (const c of CHECKPOINTS) if (ageH >= c && ageH < c + WINDOW[c] && !rec.checkpoints[c]) rec.checkpoints[c] = snap;\n            fetched++;\n          } else failed++;\n        } catch (e) {\n          if (isToken(e)) throw e;\n          if (isRate(e)) {\n            rateHit = true;\n            status.warnings.push('به سقف تعداد درخواست اینستاگرام رسیدیم؛ بقیه‌ی آمارها دفعه‌ی بعد گرفته می‌شن.');\n          } else failed++;\n        }\n      }\n      out.push(rec);\n    }\n    if (failed) status.warnings.push('آمار ' + failed + ' پست گرفته نشد.');\n    const series = Array.isArray(prev.followersSeries) ? prev.followersSeries : [];\n    if (typeof me.followers_count === 'number') {\n      const last = series[series.length - 1];\n      if (!last || last.n !== me.followers_count || NOW.getTime() - Date.parse(last.at) > 6 * HOUR) series.push({ at: NOW.toISOString(), n: me.followers_count });\n    }\n    const daily = prev.dailyFollows && typeof prev.dailyFollows === 'object' ? prev.dailyFollows : {};\n    if (!status.dailyAt || NOW.getTime() - Date.parse(status.dailyAt) > 12 * HOUR) {\n      try {\n        await fillDailyFollows(daily);\n        status.dailyAt = NOW.toISOString();\n      } catch (e) {\n        if (isToken(e)) throw e;\n        status.warnings.push('فالوورهای روزانه گرفته نشد: ' + e.message);\n      }\n    }\n    const account = { id: me.user_id || me.id, username: me.username, account_type: me.account_type, followers_count: me.followers_count, follows_count: me.follows_count, media_count: me.media_count };\n    writeJSON(path.join(OUT, 'media.json'), { kind: 'studio-instagram', version: 1, fetchedAt: NOW.toISOString(), account, media: out, followersSeries: series.slice(-3000), dailyFollows: daily });\n    Object.assign(status, { ok: true, errorCode: null, error: null, account, mediaCount: out.length, insightsFetched: fetched });\n    if (!skipFresh) {\n      const skip = { at: NOW.toISOString(), REELS: [], FEED: [] };\n      for (const key of Object.keys(failCount)) {\n        const [kind, metric] = key.split(':');\n        if (failCount[key] >= 2 && !okMetric[key]) skip[kind].push(metric);\n      }\n      status.skipMetrics = skip;\n    }\n    console.log('media: ' + out.length + ', insights fetched: ' + fetched + ', failed: ' + failed);\n  } catch (e) {\n    const code = isToken(e) ? 'token' : e.code === 'network' ? 'network' : isRate(e) ? 'rate' : 'api';\n    Object.assign(status, { ok: false, errorCode: code, error: String(e.message || e).slice(0, 300) });\n    console.log('error: ' + code + ' ' + e.message);\n  }\n  await maybeRefreshToken(status);\n  writeJSON(path.join(OUT, 'status.json'), status);\n}\n\nmain().catch((e) => {\n  console.error(e);\n  process.exitCode = 1;\n});\n";
 
 /* ---------- راه‌اندازی ---------- */
 function isDarkTheme() {
@@ -4021,6 +6062,8 @@ function handleShortcut() {
 
 async function boot() {
   await loadState();
+  await loadSyncCfg();
+  await igLoadCache();
   applyTheme();
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
   renderNav();
@@ -4028,7 +6071,8 @@ async function boot() {
   handleShortcut();
   document.getElementById('update-btn').addEventListener('click', applyUpdate);
   registerSW();
-  if (S.items.length) requestPersist();
+  requestPersist();
+  startSyncLoops();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushSave();
     else if (_cur && _cur.tab === 'home' && !_sheets.length) rerender();
