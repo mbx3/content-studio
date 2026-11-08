@@ -3,7 +3,7 @@
 /* استودیو محتوا — اپ تولید و تحلیل محتوای اینستاگرام
  * همه‌ی داده‌ها فقط روی همین دستگاه ذخیره می‌شوند (IndexedDB).
  * این فایل از چند فایل منبع کنار هم ساخته شده؛ برای تغییر، بخش مربوط را پیدا کن. */
-const APP_VERSION = '1.1.3';
+const APP_VERSION = '1.1.4';
 const APP_ID = 'fitlife-studio';
 const DAY_MS = 86400000;
 const HOUR_MS = 3600000;
@@ -396,8 +396,25 @@ function checkpointName(t, label) {
   return 'ثبت دستی';
 }
 
-// تعداد رنگ سری‌ها؛ مقدار رنگ‌ها در styles.css (--s0 تا --s6) برای حالت روشن و تیره جداست
-const SERIES_COLORS = 7;
+// تعداد رنگ سری‌ها؛ مقدار رنگ‌ها در styles.css (--s0 تا --s11) برای حالت روشن و تیره جداست
+const SERIES_COLORS = 12;
+
+// کد رنگ دلخواه سری (#RRGGBB)
+function isHexColor(v) {
+  return typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
+}
+
+// مقدار CSS رنگ: عدد = یکی از رنگ‌های آماده، رشته‌ی #RRGGBB = رنگ دلخواه
+function ciVar(c) {
+  if (isHexColor(c)) return c;
+  return 'var(--s' + ((Math.abs(parseInt(c, 10)) || 0) % SERIES_COLORS) + ')';
+}
+
+// رنگ یک سری: کد دلخواه اگه داشت، وگرنه شماره‌ی رنگ آماده
+function seriesCi(sr) {
+  if (!sr) return 6;
+  return isHexColor(sr.color) ? sr.color : sr.ci;
+}
 
 const DEFAULT_TEMPLATES = {
   ideas:
@@ -581,6 +598,7 @@ function migrate(st) {
   st.settings.templates = Object.assign({}, d.templates, cur.templates || {});
   if (!Array.isArray(st.settings.series) || !st.settings.series.length) st.settings.series = d.series;
   if (!st.settings.series.some((s) => s.id === 'other')) st.settings.series.push({ id: 'other', name: 'سایر', short: 'سایر', ci: 6 });
+  st.settings.series.forEach((s) => { if (s.color != null && !isHexColor(s.color)) delete s.color; });
   if (!Array.isArray(st.settings.checklist)) st.settings.checklist = d.checklist;
   if (!Array.isArray(st.settings.checkpoints) || !st.settings.checkpoints.length) st.settings.checkpoints = d.checkpoints;
   for (const k of COLLS) if (!Array.isArray(st[k])) st[k] = [];
@@ -763,8 +781,7 @@ function seriesById(id) {
 }
 
 function seriesVar(id) {
-  const sr = seriesById(id);
-  return '--sc:var(--s' + ((sr ? sr.ci : 6) % SERIES_COLORS) + ')';
+  return '--sc:' + ciVar(seriesCi(seriesById(id)));
 }
 
 function isCollab(it) {
@@ -899,7 +916,10 @@ async function mergeAll(data) {
   }
   // سری‌ها و فهرست‌هایی که در فایل هست ولی اینجا نیست اضافه می‌شوند
   for (const sr of inc.settings.series) {
-    if (!S.settings.series.some((s) => s.id === sr.id)) S.settings.series.push(sr);
+    const have = S.settings.series.find((s) => s.id === sr.id);
+    // سری تازه اضافه می‌شه؛ برای سری موجود فقط کد رنگی که اینجا نداره پر می‌شه
+    if (!have) S.settings.series.push(sr);
+    else if (isHexColor(sr.color) && !isHexColor(have.color)) have.color = sr.color;
   }
   for (const key in inc.settings.lists) {
     const cur = S.settings.lists[key] || (S.settings.lists[key] = []);
@@ -1037,7 +1057,7 @@ function _durBucket(s) {
 }
 
 const DIMS = {
-  series: { name: 'سری', get: (it) => it.series, label: (v) => seriesById(v).name, ci: (v) => seriesById(v).ci },
+  series: { name: 'سری', get: (it) => it.series, label: (v) => seriesById(v).name, ci: (v) => seriesCi(seriesById(v)) },
   style: { name: 'سبک اجرا', get: (it) => it.style },
   hookType: { name: 'نوع هوک', get: (it) => it.hookType },
   pubType: { name: 'نوع انتشار', get: (it) => it.pubType, label: (v) => nameOf(PUBTYPES, v) },
@@ -1382,7 +1402,7 @@ function confirmBox(opts) {
 }
 
 function _optRow(o, i, on, multi) {
-  const dot = o.ci != null ? '<span class="sdot" style="--sc:var(--s' + o.ci + ')"></span>' : '';
+  const dot = o.ci != null ? '<span class="sdot" style="--sc:' + ciVar(o.ci) + '"></span>' : '';
   const mark = multi ? '<span class="pcheck">' + ic('check') + '</span>' : on ? ic('check', 'pmark') : '';
   return '<button type="button" class="prow' + (on ? ' on' : '') + '" data-i="' + i + '" aria-pressed="' + on + '">' + dot +
     '<span class="prow-t"><b>' + esc(o.label) + '</b>' + (o.sub ? '<span>' + esc(o.sub) + '</span>' : '') + '</span>' + mark + '</button>';
@@ -1677,14 +1697,14 @@ function chipsHtml(path, options, value, o) {
     const v = typeof op === 'string' ? op : op.value;
     const l = typeof op === 'string' ? op : op.label;
     const on = vals.indexOf(v) >= 0;
-    const dot = typeof op === 'object' && op.ci != null ? '<span class="sdot" style="--sc:var(--s' + op.ci + ')"></span>' : '';
+    const dot = typeof op === 'object' && op.ci != null ? '<span class="sdot" style="--sc:' + ciVar(op.ci) + '"></span>' : '';
     return '<button type="button" class="chip' + (on ? ' on' : '') + '" data-value="' + esc(v) + '" aria-pressed="' + on + '">' + dot + esc(l) + '</button>';
   });
   return '<div class="chips' + (o.scroll ? ' scroll' : '') + '" data-chips' + (path ? ' data-bind="' + path + '"' : '') + (o.multi ? ' data-multi' : '') + (o.clearable === false ? '' : ' data-clearable') + '>' + items.join('') + '</div>';
 }
 
 function seriesOptions() {
-  return S.settings.series.map((s) => ({ value: s.id, label: s.name, ci: s.ci }));
+  return S.settings.series.map((s) => ({ value: s.id, label: s.name, ci: seriesCi(s) }));
 }
 
 function idOptions(list) {
@@ -1707,7 +1727,7 @@ function emptyHtml(icon, title, text, action) {
 
 function seriesTag(id) {
   const sr = seriesById(id);
-  return '<span class="stag" style="--sc:var(--s' + sr.ci + ')"><span class="sdot"></span>' + esc(sr.short || sr.name) + '</span>';
+  return '<span class="stag" style="--sc:' + ciVar(seriesCi(sr)) + '"><span class="sdot"></span>' + esc(sr.short || sr.name) + '</span>';
 }
 
 function badgeHtml(text, kind, icon) {
@@ -1741,7 +1761,7 @@ function trendHtml(points, mid, med) {
   if (!points.length) return '';
   const top = niceMax(Math.max(Math.max.apply(null, points.map((p) => p.v)), med || 0));
   const bars = points.map((p) =>
-    '<button type="button" class="tc-bar" style="height:' + Math.max(1.5, (p.v / top) * 100).toFixed(2) + '%;--sc:var(--s' + p.ci + ')" data-id="' + p.id + '" data-label="' + esc(p.label) +
+    '<button type="button" class="tc-bar" style="height:' + Math.max(1.5, (p.v / top) * 100).toFixed(2) + '%;--sc:' + ciVar(p.ci) + '" data-id="' + p.id + '" data-label="' + esc(p.label) +
     '" data-val="' + esc(fmtMetric(mid, p.v)) + '" aria-label="' + esc(p.label) + '، ' + esc(fmtMetric(mid, p.v)) + '"></button>').join('');
   const medPos = med != null ? (med / top) * 100 : null;
   const medLine = medPos != null ? '<div class="tc-med" style="bottom:' + medPos.toFixed(2) + '%"></div>' : '';
@@ -1765,7 +1785,7 @@ function gcHtml(rows, mid) {
   const pos = (v) => clamp((v / max) * 100, 0, 100).toFixed(2);
   const body = rows.map((r) =>
     '<div class="gc-row' + (r.n < 2 ? ' thin' : '') + '">' +
-    '<div class="gc-head"><span class="gc-name">' + (r.ci != null ? '<span class="sdot" style="--sc:var(--s' + r.ci + ')"></span>' : '') + esc(r.label) + '</span>' +
+    '<div class="gc-head"><span class="gc-name">' + (r.ci != null ? '<span class="sdot" style="--sc:' + ciVar(r.ci) + '"></span>' : '') + esc(r.label) + '</span>' +
     '<span class="gc-val">' + fmtMetric(mid, r.med) + '</span><span class="gc-n">' + faNum(r.n) + ' پست</span></div>' +
     '<div class="gc-track">' + r.pts.map((p) =>
       '<button type="button" class="gc-dot" style="inset-inline-start:' + pos(p.v) + '%;' + seriesVar(p.it.series) + '" data-id="' + p.it.id + '" data-label="' + esc(p.it.title) +
@@ -1793,7 +1813,7 @@ function hbarsHtml(rows) {
   if (!rows.length) return '';
   const max = Math.max.apply(null, rows.map((r) => r.v).concat([0])) || 1;
   return '<div class="hbs">' + rows.map((r) =>
-    '<div class="hb"><div class="hb-l">' + (r.ci != null ? '<span class="sdot" style="--sc:var(--s' + r.ci + ')"></span>' : '') + '<span>' + esc(r.label) + '</span></div>' +
+    '<div class="hb"><div class="hb-l">' + (r.ci != null ? '<span class="sdot" style="--sc:' + ciVar(r.ci) + '"></span>' : '') + '<span>' + esc(r.label) + '</span></div>' +
     '<div class="hb-t"><div class="hb-b" style="width:' + ((r.v / max) * 100).toFixed(2) + '%"></div></div>' +
     '<div class="hb-v">' + (r.fmt != null ? r.fmt : fmtNum(r.v)) + '</div></div>').join('') + '</div>';
 }
@@ -1803,7 +1823,7 @@ function seriesLegend(ids) {
   if (uniq.length < 2) return '';
   return '<div class="legend">' + uniq.map((id) => {
     const sr = seriesById(id);
-    return '<span><span class="sdot" style="--sc:var(--s' + sr.ci + ')"></span>' + esc(sr.short || sr.name) + '</span>';
+    return '<span><span class="sdot" style="--sc:' + ciVar(seriesCi(sr)) + '"></span>' + esc(sr.short || sr.name) + '</span>';
   }).join('') + '</div>';
 }
 
@@ -2102,7 +2122,7 @@ async function pickPostForStat() {
   if (!pubs.length) { toast('هنوز پست منتشرشده‌ای نداری'); return; }
   const v = await pickOne({
     title: 'آمار کدوم پست؟',
-    options: pubs.map((it) => ({ value: it.id, label: it.title, sub: (due.has(it.id) ? 'وقت ثبت آمار ' + checkpointName(due.get(it.id).c) + '، ' : '') + (it.publishDate ? fmtJ(it.publishDate) : 'بدون تاریخ'), ci: seriesById(it.series).ci })),
+    options: pubs.map((it) => ({ value: it.id, label: it.title, sub: (due.has(it.id) ? 'وقت ثبت آمار ' + checkpointName(due.get(it.id).c) + '، ' : '') + (it.publishDate ? fmtJ(it.publishDate) : 'بدون تاریخ'), ci: seriesCi(seriesById(it.series)) })),
   });
   if (v) go('#/item/' + v + '/stat/new');
 }
@@ -2306,7 +2326,7 @@ function viewContent(q) {
   };
   const presentSeries = Array.from(new Set(S.items.map((it) => it.series)));
   const seriesChips = S.settings.series.filter((s) => presentSeries.indexOf(s.id) >= 0)
-    .map((s) => '<button type="button" class="chip' + (q.sr === s.id ? ' on' : '') + '" data-sr="' + s.id + '"><span class="sdot" style="--sc:var(--s' + s.ci + ')"></span>' + esc(s.short || s.name) + '</button>').join('');
+    .map((s) => '<button type="button" class="chip' + (q.sr === s.id ? ' on' : '') + '" data-sr="' + s.id + '"><span class="sdot" style="--sc:' + ciVar(seriesCi(s)) + '"></span>' + esc(s.short || s.name) + '</button>').join('');
   let extra = '';
   if (tab === 'idea') {
     extra = '<div class="chips scroll">' + S.settings.lists.locations.map((l) => '<button type="button" class="chip' + (q.loc === l ? ' on' : '') + '" data-loc="' + esc(l) + '">' + esc(l) + '</button>').join('') + '</div>';
@@ -3023,7 +3043,7 @@ function balanceHtml(b, label) {
   }
   const goalRows = GOALS.map((g) => ({ label: g.name, v: b.byGoal[g.id] || 0 }));
   if (b.byGoal.none) goalRows.push({ label: 'بدون هدف', v: b.byGoal.none });
-  const seriesRows = Object.keys(b.bySeries).map((sid) => ({ label: seriesById(sid).name, v: b.bySeries[sid], ci: seriesById(sid).ci })).sort((x, y) => y.v - x.v);
+  const seriesRows = Object.keys(b.bySeries).map((sid) => ({ label: seriesById(sid).name, v: b.bySeries[sid], ci: seriesCi(seriesById(sid)) })).sort((x, y) => y.v - x.v);
   return '<div class="card"><div class="card-h"><b>تعادل محتوا</b><span class="muted small">' + label + '، ' + faNum(b.total) + ' پست</span></div>' +
     '<div class="bal-sub">بر اساس هدف</div>' + hbarsHtml(goalRows) +
     '<div class="bal-sub">بر اساس سری</div>' + hbarsHtml(seriesRows) +
@@ -3149,7 +3169,7 @@ async function scheduleFromBank(iso) {
   if (!cands.length) { toast('ایده یا پستی در حال تولید نداری'); return; }
   const v = await pickOne({
     title: 'چی رو برای ' + fmtJShort(iso) + ' بذارم؟',
-    options: cands.map((it) => ({ value: it.id, label: it.title, sub: stageName(it.stage) + (it.plannedDate ? '؛ الان برای ' + fmtJShort(it.plannedDate) : ''), ci: seriesById(it.series).ci })),
+    options: cands.map((it) => ({ value: it.id, label: it.title, sub: stageName(it.stage) + (it.plannedDate ? '؛ الان برای ' + fmtJShort(it.plannedDate) : ''), ci: seriesCi(seriesById(it.series)) })),
   });
   if (!v) return;
   const it = itemById(v);
@@ -3194,7 +3214,7 @@ function viewAnalysis(q) {
   } else {
     const recent = vals.slice(-24);
     h += '<section class="sec">' + secHead('روند', '<span class="muted small">' + (recent.length < vals.length ? faNum(recent.length) + ' پست آخر، ' : '') + 'به ترتیب انتشار</span>') +
-      '<div class="card">' + trendHtml(recent.map((x) => ({ id: x.it.id, label: x.it.title, v: x.v, ci: seriesById(x.it.series).ci })), mid, med) +
+      '<div class="card">' + trendHtml(recent.map((x) => ({ id: x.it.id, label: x.it.title, v: x.v, ci: seriesCi(seriesById(x.it.series)) })), mid, med) +
       seriesLegend(recent.map((x) => x.it.series)) + '</div></section>';
 
     const rows = groupCompare(pool, mid, basis, dim);
@@ -3247,12 +3267,12 @@ function viewAnalysis(q) {
           return;
         }
         if (e.target.closest('[data-all]')) {
-          const v = await pickOne({ title: 'همه‌ی پست‌ها: ' + m.name, options: ranked.map((x, i) => ({ value: x.it.id, label: faNum(i + 1) + '. ' + x.it.title, sub: fmtMetric(mid, x.v), ci: seriesById(x.it.series).ci })) });
+          const v = await pickOne({ title: 'همه‌ی پست‌ها: ' + m.name, options: ranked.map((x, i) => ({ value: x.it.id, label: faNum(i + 1) + '. ' + x.it.title, sub: fmtMetric(mid, x.v), ci: seriesCi(seriesById(x.it.series)) })) });
           if (v) go('#/item/' + v);
           return;
         }
         if (e.target.closest('[data-missing]')) {
-          const v = await pickOne({ title: 'پست‌های بدون «' + m.name + '»', options: missing.map((it) => ({ value: it.id, label: it.title, sub: it.snapshots.length ? faNum(it.snapshots.length) + ' ثبت آمار' : 'بدون آمار', ci: seriesById(it.series).ci })) });
+          const v = await pickOne({ title: 'پست‌های بدون «' + m.name + '»', options: missing.map((it) => ({ value: it.id, label: it.title, sub: it.snapshots.length ? faNum(it.snapshots.length) + ' ثبت آمار' : 'بدون آمار', ci: seriesCi(seriesById(it.series)) })) });
           if (v) go('#/item/' + v + '?tab=stats');
         }
       });
@@ -3318,7 +3338,7 @@ function viewFunnel(q) {
       if (!it) return;
       bySeries[it.series] = (bySeries[it.series] || 0) + (l.count || 1);
     });
-    const sRows = Object.keys(bySeries).map((sid) => ({ label: seriesById(sid).name, v: bySeries[sid], ci: seriesById(sid).ci })).sort((a, b) => b.v - a.v);
+    const sRows = Object.keys(bySeries).map((sid) => ({ label: seriesById(sid).name, v: bySeries[sid], ci: seriesCi(seriesById(sid)) })).sort((a, b) => b.v - a.v);
     if (sRows.length) h += '<section class="sec">' + secHead('بر اساس سری') + '<div class="card">' + hbarsHtml(sRows) + '</div></section>';
     const groupBy = (key) => {
       const m = {};
@@ -3390,7 +3410,7 @@ function leadSheet(preset, existing) {
           const v = await pickOne({
             title: 'از کدوم پست؟',
             value: d.itemId || '__none',
-            options: [{ value: '__none', label: 'نامشخص' }].concat(pubs.map((it) => ({ value: it.id, label: it.title, sub: it.publishDate ? fmtJ(it.publishDate) : '', ci: seriesById(it.series).ci }))),
+            options: [{ value: '__none', label: 'نامشخص' }].concat(pubs.map((it) => ({ value: it.id, label: it.title, sub: it.publishDate ? fmtJ(it.publishDate) : '', ci: seriesCi(seriesById(it.series)) }))),
           });
           if (v !== undefined) {
             d.itemId = v === '__none' ? null : v;
@@ -3476,7 +3496,7 @@ function learningSheet(preset, existing) {
       b.addEventListener('click', async (e) => {
         if (e.target.closest('[data-links]')) {
           const items = activeItems().slice().sort((x, y) => pubKey(y) - pubKey(x));
-          const v = await pickMany({ title: 'پست‌های مرتبط', values: d.itemIds, options: items.map((it) => ({ value: it.id, label: it.title, sub: isPublished(it) ? 'منتشرشده' : stageName(it.stage), ci: seriesById(it.series).ci })) });
+          const v = await pickMany({ title: 'پست‌های مرتبط', values: d.itemIds, options: items.map((it) => ({ value: it.id, label: it.title, sub: isPublished(it) ? 'منتشرشده' : stageName(it.stage), ci: seriesCi(seriesById(it.series)) })) });
           if (v) { d.itemIds = v; b.querySelector('[data-linked]').innerHTML = linkedHtml(); }
           return;
         }
@@ -4007,11 +4027,40 @@ function viewSettings() {
 }
 
 /* ---------- سری‌ها ---------- */
+// برگه‌ی کد رنگ دلخواه: انتخابگر رنگ گوشی + نوشتن کد #RRGGBB
+function askHexColor(initial) {
+  return new Promise((resolve) => {
+    let result = null;
+    openSheet({
+      title: 'کد رنگ دلخواه',
+      body:
+        '<div class="hex-row"><input type="color" class="hex-pick" value="' + esc(initial) + '" aria-label="انتخاب رنگ">' +
+        '<input class="input hex-text" dir="ltr" maxlength="7" value="' + esc(initial) + '" placeholder="#3B4A7A" aria-label="کد رنگ" autofocus></div>' +
+        '<p class="muted small">کد شش‌رقمی با # اول، مثل #3B4A7A. این رنگ توی حالت روشن و تیره یکیه.</p>' +
+        '<div class="sheet-actions"><button type="button" class="btn primary" data-ok>ثبت رنگ</button><button type="button" class="btn ghost" data-sclose>انصراف</button></div>',
+      onMount: (b) => {
+        const pick = b.querySelector('.hex-pick');
+        const txt = b.querySelector('.hex-text');
+        const norm = (v) => { v = v.trim(); if (v && v[0] !== '#') v = '#' + v; return v; };
+        pick.addEventListener('input', () => { txt.value = pick.value.toUpperCase(); txt.classList.remove('bad'); });
+        txt.addEventListener('input', () => { const v = norm(txt.value); txt.classList.toggle('bad', !!v && !isHexColor(v)); if (isHexColor(v)) pick.value = v.toLowerCase(); });
+        b.querySelector('[data-ok]').addEventListener('click', () => {
+          const v = norm(txt.value);
+          if (!isHexColor(v)) { toast('کد رنگ درست نیست'); return; }
+          result = v.toUpperCase();
+          closeSheet();
+        });
+      },
+      onClose: () => resolve(result),
+    });
+  });
+}
+
 function viewSeriesSettings() {
   const used = {};
   S.items.forEach((it) => { used[it.series] = (used[it.series] || 0) + 1; });
   const rows = S.settings.series.map((s) =>
-    '<div class="se-row" data-sid="' + s.id + '"><button type="button" class="swatch" style="--sc:var(--s' + s.ci + ')" data-color aria-label="رنگ"></button>' +
+    '<div class="se-row" data-sid="' + s.id + '"><button type="button" class="swatch" style="--sc:' + ciVar(seriesCi(s)) + '" data-color aria-label="رنگ"></button>' +
     '<div class="se-fields"><input class="input" data-f="name" value="' + esc(s.name) + '" aria-label="اسم سری"><input class="input sm" data-f="short" value="' + esc(s.short || '') + '" aria-label="اسم کوتاه" placeholder="اسم کوتاه"></div>' +
     (s.id === 'other' ? '<span class="icon-btn sm"></span>' : '<button type="button" class="icon-btn sm" data-del aria-label="حذف">' + ic('trash') + '</button>') +
     '<span class="se-n">' + faNum(used[s.id] || 0) + ' پست</span></div>').join('');
@@ -4037,8 +4086,21 @@ function viewSeriesSettings() {
         const row = e.target.closest('[data-sid]');
         if (e.target.closest('[data-color]')) {
           const s = S.settings.series.find((x) => x.id === row.dataset.sid);
-          const v = await pickOne({ title: 'رنگ سری', value: s.ci, options: Array.from({ length: SERIES_COLORS }, (_, i) => ({ value: i, label: 'رنگ ' + faNum(i + 1), sub: S.settings.series.filter((x) => x.ci === i).map((x) => x.name).join('، '), ci: i })) });
-          if (v != null) { s.ci = v; save(); rerender(); }
+          const custom = isHexColor(s.color);
+          const opts = Array.from({ length: SERIES_COLORS }, (_, i) => ({ value: i, label: 'رنگ ' + faNum(i + 1), sub: S.settings.series.filter((x) => x.ci === i && !isHexColor(x.color)).map((x) => x.name).join('، '), ci: i }));
+          opts.push({ value: '__hex', label: 'کد رنگ دلخواه', sub: custom ? s.color : 'مثلاً #3B4A7A', ci: custom ? s.color : null });
+          const v = await pickOne({ title: 'رنگ سری', value: custom ? '__hex' : s.ci, options: opts });
+          if (v == null) return;
+          if (v === '__hex') {
+            const hex = await askHexColor(custom ? s.color : '#3B4A7A');
+            if (!hex) return;
+            s.color = hex;
+          } else {
+            s.ci = v;
+            delete s.color;
+          }
+          save();
+          rerender();
           return;
         }
         if (e.target.closest('[data-del]')) {
@@ -5743,7 +5805,7 @@ function viewInstagram() {
         }
         if (e.target.closest('[data-pick]')) {
           const pool = activeItems().filter((i) => !i.igId).sort((a, b) => pubKey(b) - pubKey(a));
-          const v = await pickOne({ title: 'وصل به کدوم پست؟', options: pool.map((i) => ({ value: i.id, label: i.title, sub: (isPublished(i) ? (i.publishDate ? fmtJ(i.publishDate) : 'منتشرشده، بدون تاریخ') : stageName(i.stage)), ci: seriesById(i.series).ci })) });
+          const v = await pickOne({ title: 'وصل به کدوم پست؟', options: pool.map((i) => ({ value: i.id, label: i.title, sub: (isPublished(i) ? (i.publishDate ? fmtJ(i.publishDate) : 'منتشرشده، بدون تاریخ') : stageName(i.stage)), ci: seriesCi(seriesById(i.series)) })) });
           if (!v) return;
           const it = itemById(v);
           igLink(it, m);
@@ -6046,7 +6108,7 @@ window.addEventListener('scroll', () => {
 
 /* ---------- فایل‌های ریپوی داده‌ها (ساخته‌شده از پوشه‌ی data-repo) ---------- */
 const REPO_README = "# داده‌های استودیو محتوا\n\nاین ریپو **خصوصیه** و داده‌های اپ «استودیو محتوا» اینجا نگه داشته می‌شه. هیچ‌وقت Public نکنش.\n\n| فایل یا پوشه | چیه |\n|---|---|\n| `state.json` | همه‌ی داده‌های اپ. اپ بعد از هر تغییر خودش اینجا ذخیره‌شون می‌کنه. |\n| تاریخچه‌ی `state.json` | هر ذخیره یک نسخه‌ست. از داخل اپ: بیشتر ← پشتیبان و همگام‌سازی ← تاریخچه‌ی نسخه‌ها. |\n| `inbox/` | تحلیل‌ها و پیشنهادهای Claude. اپ خودش می‌خونه‌شون. |\n| `instagram/` | آماری که گیت‌هاب هر ۳ ساعت از اینستاگرام می‌گیره. |\n| `scripts/`، `.github/workflows/` | برنامه‌ی دریافت آمار اینستاگرام. |\n| `CLAUDE.md` | راهنمای Claude برای خوندن داده‌ها و نوشتن تحلیل. |\n\nدستی چیزی رو اینجا عوض نکن؛ همه‌ی تغییرها از داخل اپ انجام می‌شه.\n\n## Secrets اینستاگرام\n\nSettings ← Secrets and variables ← Actions ← New repository secret:\n\n- `IG_TOKEN`: توکن اینستاگرام که از Meta for Developers گرفتی. قبل از ساختنش، مجوز `instagram_business_manage_insights` باید به اپ متا اضافه شده باشه.\n- `STUDIO_PAT`: همون توکن گیت‌هابی که توی اپ گذاشتی. باهاش توکن اینستاگرام هر هفته خودکار تمدید می‌شه.\n\nراهنمای قدم‌به‌قدم داخل خود اپه: بیشتر ← اینستاگرام ← راهنما و تنظیمات.\n\n## اگه گوشی گم شد\n\nتوکن گیت‌هاب اپ رو از github.com/settings/personal-access-tokens پاک کن و یک توکن تازه بساز.\n";
-const REPO_CLAUDE = "# studio-data — instructions for Claude\n\nThis private repo holds the data of «استودیو محتوا», Dr. Mohammad Bazrafshan's Instagram content app\n(PWA: https://mbx3.github.io/content-studio/, code: mbx3/content-studio). He talks to you in Persian,\nin the Claude Project «کار و تولید محتوا کلینیک».\n\nThree writers, three areas. Stay in yours:\n\n| Path | Written by | Claude may |\n|---|---|---|\n| `state.json` | the app (auto-backup after every change) | read only |\n| `instagram/media.json`, `instagram/status.json` | GitHub Actions (`.github/workflows/instagram.yml`, `scripts/instagram-sync.mjs`) every 3 hours | read only |\n| `inbox/*.json` | **Claude** | add new files only |\n\nNever edit `state.json`: the app owns it and would overwrite or merge your edit unpredictably.\nEvery change you want in the app goes through an inbox suggestion that the user applies with one tap.\nNever read, print or commit secrets (`IG_TOKEN`, `STUDIO_PAT`).\n\n## Answering a request\n\n1. `add_repo mbx3/studio-data` with push access, clone it, load `state.json` (and `instagram/media.json` if present) with Python.\n2. Open questions the user asked from the app are in `data.questions` with `status: \"open\"`; the chat message quotes the question id (`q-…`).\n3. Read `data.inbox[*].decisions` first: it shows which of your earlier suggestions he applied or rejected. Don't repeat rejected ones.\n4. Compute with code, never by eye. Report the number of posts behind every comparison. With small groups (n ≤ 3), call it a hypothesis worth a Trial Reel, not a finding.\n5. Write **one new file** `inbox/YYYYMMDD-HHMM-<slug>.json` (UTC time) using the schema below. Set `answers` to the question id when answering one.\n6. Commit with message `تحلیل Claude: <title>`, `git pull --rebase`, push.\n7. In chat, give a short summary and tell him: «توی اپ: بیشتر ← تحلیل‌های Claude ← بروزرسانی».\n\nIf the repo isn't reachable (GitHub App not installed), produce the same JSON as a file in chat; he imports it from «وارد کردن از فایل».\n\n## Data model (`state.json` → `data`)\n\n`items[]` — posts and ideas:\n`id, title, series, stage (idea|script|shoot|edit|ready|published), goal (attract|trust|sell|null), format (reel|carousel|post|story), pubType (normal|trial|collab|collab2), style, hookType, ctaType, source, concerns[], location, priority (high|mid|low), notes, plannedDate, plannedTime, publishDate (YYYY-MM-DD, Tehran local), publishTime (HH:MM, or null = unknown), durationSec, script{hook,retention,body,cta,shots}, cover{text,notes}, caption, sources[{id,text,verified}], checklist{ruleId:true}, snapshots[], archived, igId, permalink, createdAt, updatedAt`\n\n`items[].snapshots[]` — one stats reading:\n`id, t (hours after publishing; null = unknown), label, takenAt, views, reach (Accounts reached: the denominator), follows, profileVisits, likes, comments, shares, saves, reposts, likesPct, commentsPct, sharesPct, savesPct, repostsPct (% of reach, as Instagram shows them), skipRate (%), avgWatch (seconds), followersPct (% of viewers who already followed), age2554, age1317 (%), src{reels, explore, feed, stories, profile, other} (% of views), note, ig (true = from the Instagram API), igLatest (the rolling latest API reading), by`\n\nOther collections:\n- `leads[]`: `date, type (dm|booking|visit|online), count, center, itemId, channel` — patient funnel, numbers only, no patient data.\n- `learnings[]`: `text, status (hyp|test|ok|no), category, itemIds[], date`.\n- `snippets[]`: `kind (hook|cta|retention|cover), text, series, itemId, used, result (good|bad|null)`.\n- `questions[]`: `id, text, itemId, status (open|answered), answerKey, createdAt`.\n- `inbox{key: {title, createdAt, report, suggestions, decisions{suggestionId: {d: applied|rejected, at, r}}}}`.\n- `settings.series[]`: `id, name, short`. Defaults: `qa` «۳۰ ثانیه، یک سوال», `sci` «علم رژیم», `fun` طنز و سرگرمی, `self` از خودم, `cook` آشپزخونه, `clinic` کولب کلینیک, `other` سایر.\n- `settings.lists`: `sources, concerns, styles, hookTypes, ctaTypes, locations, centers, channels, lcats` (learning categories).\n- `settings.checklist[]`, `settings.checkpoints` (hours, default 24/72/168/720), `settings.profile`, `settings.templates`.\n- `tomb{id: deletedAt}`: deleted records; ignore those ids.\n\n## Metrics (same definitions as the app)\n\n- Follow conversion = follows ÷ reach × 100. The page's key growth metric.\n- Save rate = savesPct, else saves ÷ reach × 100. Share and comment rates likewise.\n- Retention = avgWatch ÷ durationSec. Profile visits per 1,000 reach. Non-follower share = 100 − followersPct.\n- \"Latest\" = the last snapshot that has the value. Comparing at a fixed checkpoint (`t == 72` etc.) is fairer between old and new posts.\n- Exclude `pubType` collab/collab2 from page baselines by default: their views come from the clinic's page.\n- The Instagram API gives no follows or profile visits for Reels; those exist only where he entered them by hand.\n\n## Inbox file schema\n\n```json\n{\n  \"kind\": \"studio-inbox\",\n  \"version\": 1,\n  \"id\": \"20261027-0930-weekly\",\n  \"createdAt\": \"2026-10-27T09:30:00Z\",\n  \"title\": \"تحلیل هفتگی\",\n  \"answers\": \"q-xxxx\",\n  \"report\": \"## عنوان\\nمتن، - فهرست، 1. فهرست شماره‌دار، **پررنگ**، | جدول |، > نقل‌قول\",\n  \"suggestions\": [\n    { \"id\": \"s1\", \"type\": \"learning\", \"text\": \"…\", \"status\": \"hyp\", \"category\": \"فرمت\", \"itemIds\": [\"…\"], \"why\": \"…\" }\n  ]\n}\n```\n\nSuggestion types (every suggestion may carry `why`):\n\n| type | fields |\n|---|---|\n| `learning` | `text, status (hyp|test|ok|no), category?, itemIds?` |\n| `idea` | `title, series, goal?, notes?, concerns?, format?, hook?, source?, priority?, style?` |\n| `snippet` | `kind (hook|cta|retention|cover), text, series?, itemId?` |\n| `update` | `itemId, set{series, goal, format, pubType, style, hookType, ctaType, source, location, concerns, durationSec, publishDate, publishTime, title, caption, priority, stage}` |\n| `note` | `itemId, text` (appended to the post's notes) |\n| `snapshot` | `itemId, snapshot{t or label, views, reach, follows, …, src{…}}, durationSec?` |\n| `post` | `item{title, series, publishDate, publishTime?, pubType, format, durationSec?, style?, hookType?, ctaType?, goal?, caption?, notes?}, snapshots[]` |\n| `checklist` | `text` (a new pre-publish rule) |\n| `link` | `itemId, igId` (from `instagram/media.json`), `caption?` — links an app post to its Instagram post; the app then fills exact publish date and time, permalink, format and the API stats |\n\nReuse existing list values (`settings.lists`) for style, hookType, ctaType, source, location, concerns and category whenever one fits; a new value is added to the list when applied.\nKeep `report` readable on a phone: short sections, small tables, no wall of text.\n\n## `instagram/media.json` and `status.json`\n\n`media.json`: `fetchedAt, account{username, followers_count, media_count}, media[], followersSeries[{at, n}], dailyFollows{\"YYYY-MM-DD\" (Tehran): {total, …follow_type breakdown}}`.\n`media[]`: `id, caption, media_type (IMAGE|VIDEO|CAROUSEL_ALBUM), media_product_type (FEED|REELS), permalink, timestamp (UTC), like_count, comments_count, checkpoints{\"24\"|\"72\"|\"168\"|\"720\": {at, ageH, m}}, latest{at, ageH, m}, noInsights?{at, error}`.\n`m` uses API names: `views, reach, likes, comments, shares, saved, reposts, total_interactions`, feed only `follows, profile_visits`, reels only `ig_reels_avg_watch_time` and `ig_reels_video_view_total_time` (milliseconds), `reels_skip_rate` (%).\nApp posts linked to Instagram carry `igId`. To link the rest, match on the Tehran date of `timestamp` plus caption content and write `link` suggestions. When two candidates fit equally, don't guess: list them in the report.\n`status.json`: `ok, errorCode (no-token|token|permission|rate|network|api), error, warnings[], lastRunAt`. Tell him about any problem it shows; `permission` means the token lacks `instagram_business_manage_insights`.\n\n## Insights screenshots\n\nWhen he sends screenshots of Instagram Insights, match each to a post (title or date → `itemId`), read the numbers exactly and skip anything unreadable.\nMap: Accounts reached → `reach`; Views → `views`; the percentages beside interactions → `*Pct`; average watch time → `avgWatch` in seconds; skip rate → `skipRate`; follows → `follows`; traffic sources → `src`; follower share → `followersPct`.\nSet `t` to the hours since publishing when known, else a `label`. Write `snapshot` suggestions, or `post` suggestions for posts the app doesn't have.\n\n## Voice and values\n\nPersian, conversational, concrete, tied to his own past numbers and his audience (adults 25–54 losing weight with diet or injections).\nScientific accuracy first, uncertainty disclosed, no patient shaming, no drug brand names in his own text.\nJudge ideas by whether they grow the page and bring patients (dm/booking leads), not by views alone.\n";
+const REPO_CLAUDE = "# studio-data — instructions for Claude\n\nThis private repo holds the data of «استودیو محتوا», Dr. Mohammad Bazrafshan's Instagram content app\n(PWA: https://mbx3.github.io/content-studio/, code: mbx3/content-studio). He talks to you in Persian,\nin the Claude Project «کار و تولید محتوا کلینیک».\n\nThree writers, three areas. Stay in yours:\n\n| Path | Written by | Claude may |\n|---|---|---|\n| `state.json` | the app (auto-backup after every change) | read only |\n| `instagram/media.json`, `instagram/status.json` | GitHub Actions (`.github/workflows/instagram.yml`, `scripts/instagram-sync.mjs`) every 3 hours | read only |\n| `inbox/*.json` | **Claude** | add new files only |\n\nNever edit `state.json`: the app owns it and would overwrite or merge your edit unpredictably.\nEvery change you want in the app goes through an inbox suggestion that the user applies with one tap.\nNever read, print or commit secrets (`IG_TOKEN`, `STUDIO_PAT`).\n\n## Answering a request\n\n1. `add_repo mbx3/studio-data` with push access, clone it, load `state.json` (and `instagram/media.json` if present) with Python.\n2. Open questions the user asked from the app are in `data.questions` with `status: \"open\"`; the chat message quotes the question id (`q-…`).\n3. Read `data.inbox[*].decisions` first: it shows which of your earlier suggestions he applied or rejected. Don't repeat rejected ones.\n4. Compute with code, never by eye. Report the number of posts behind every comparison. With small groups (n ≤ 3), call it a hypothesis worth a Trial Reel, not a finding.\n5. Write **one new file** `inbox/YYYYMMDD-HHMM-<slug>.json` (UTC time) using the schema below. Set `answers` to the question id when answering one.\n6. Commit with message `تحلیل Claude: <title>`, `git pull --rebase`, push.\n7. In chat, give a short summary and tell him: «توی اپ: بیشتر ← تحلیل‌های Claude ← بروزرسانی».\n\nIf the repo isn't reachable (GitHub App not installed), produce the same JSON as a file in chat; he imports it from «وارد کردن از فایل».\n\n## Data model (`state.json` → `data`)\n\n`items[]` — posts and ideas:\n`id, title, series, stage (idea|script|shoot|edit|ready|published), goal (attract|trust|sell|null), format (reel|carousel|post|story), pubType (normal|trial|collab|collab2), style, hookType, ctaType, source, concerns[], location, priority (high|mid|low), notes, plannedDate, plannedTime, publishDate (YYYY-MM-DD, Tehran local), publishTime (HH:MM, or null = unknown), durationSec, script{hook,retention,body,cta,shots}, cover{text,notes}, caption, sources[{id,text,verified}], checklist{ruleId:true}, snapshots[], archived, igId, permalink, createdAt, updatedAt`\n\n`items[].snapshots[]` — one stats reading:\n`id, t (hours after publishing; null = unknown), label, takenAt, views, reach (Accounts reached: the denominator), follows, profileVisits, likes, comments, shares, saves, reposts, likesPct, commentsPct, sharesPct, savesPct, repostsPct (% of reach, as Instagram shows them), skipRate (%), avgWatch (seconds), followersPct (% of viewers who already followed), age2554, age1317 (%), src{reels, explore, feed, stories, profile, other} (% of views), note, ig (true = from the Instagram API), igLatest (the rolling latest API reading), by`\n\nOther collections:\n- `leads[]`: `date, type (dm|booking|visit|online), count, center, itemId, channel` — patient funnel, numbers only, no patient data.\n- `learnings[]`: `text, status (hyp|test|ok|no), category, itemIds[], date`.\n- `snippets[]`: `kind (hook|cta|retention|cover), text, series, itemId, used, result (good|bad|null)`.\n- `questions[]`: `id, text, itemId, status (open|answered), answerKey, createdAt`.\n- `inbox{key: {title, createdAt, report, suggestions, decisions{suggestionId: {d: applied|rejected, at, r}}}}`.\n- `settings.series[]`: `id, name, short, ci` (palette index 0–11), optional `color` (`#RRGGBB`, overrides `ci`). Defaults: `qa` «۳۰ ثانیه، یک سوال», `sci` «علم رژیم», `fun` طنز و سرگرمی, `self` از خودم, `cook` آشپزخونه, `clinic` کولب کلینیک, `other` سایر.\n- `settings.lists`: `sources, concerns, styles, hookTypes, ctaTypes, locations, centers, channels, lcats` (learning categories).\n- `settings.checklist[]`, `settings.checkpoints` (hours, default 24/72/168/720), `settings.profile`, `settings.templates`.\n- `tomb{id: deletedAt}`: deleted records; ignore those ids.\n\n## Metrics (same definitions as the app)\n\n- Follow conversion = follows ÷ reach × 100. The page's key growth metric.\n- Save rate = savesPct, else saves ÷ reach × 100. Share and comment rates likewise.\n- Retention = avgWatch ÷ durationSec. Profile visits per 1,000 reach. Non-follower share = 100 − followersPct.\n- \"Latest\" = the last snapshot that has the value. Comparing at a fixed checkpoint (`t == 72` etc.) is fairer between old and new posts.\n- Exclude `pubType` collab/collab2 from page baselines by default: their views come from the clinic's page.\n- The Instagram API gives no follows or profile visits for Reels; those exist only where he entered them by hand.\n\n## Inbox file schema\n\n```json\n{\n  \"kind\": \"studio-inbox\",\n  \"version\": 1,\n  \"id\": \"20261027-0930-weekly\",\n  \"createdAt\": \"2026-10-27T09:30:00Z\",\n  \"title\": \"تحلیل هفتگی\",\n  \"answers\": \"q-xxxx\",\n  \"report\": \"## عنوان\\nمتن، - فهرست، 1. فهرست شماره‌دار، **پررنگ**، | جدول |، > نقل‌قول\",\n  \"suggestions\": [\n    { \"id\": \"s1\", \"type\": \"learning\", \"text\": \"…\", \"status\": \"hyp\", \"category\": \"فرمت\", \"itemIds\": [\"…\"], \"why\": \"…\" }\n  ]\n}\n```\n\nSuggestion types (every suggestion may carry `why`):\n\n| type | fields |\n|---|---|\n| `learning` | `text, status (hyp|test|ok|no), category?, itemIds?` |\n| `idea` | `title, series, goal?, notes?, concerns?, format?, hook?, source?, priority?, style?` |\n| `snippet` | `kind (hook|cta|retention|cover), text, series?, itemId?` |\n| `update` | `itemId, set{series, goal, format, pubType, style, hookType, ctaType, source, location, concerns, durationSec, publishDate, publishTime, title, caption, priority, stage}` |\n| `note` | `itemId, text` (appended to the post's notes) |\n| `snapshot` | `itemId, snapshot{t or label, views, reach, follows, …, src{…}}, durationSec?` |\n| `post` | `item{title, series, publishDate, publishTime?, pubType, format, durationSec?, style?, hookType?, ctaType?, goal?, caption?, notes?}, snapshots[]` |\n| `checklist` | `text` (a new pre-publish rule) |\n| `link` | `itemId, igId` (from `instagram/media.json`), `caption?` — links an app post to its Instagram post; the app then fills exact publish date and time, permalink, format and the API stats |\n\nReuse existing list values (`settings.lists`) for style, hookType, ctaType, source, location, concerns and category whenever one fits; a new value is added to the list when applied.\nKeep `report` readable on a phone: short sections, small tables, no wall of text.\n\n## `instagram/media.json` and `status.json`\n\n`media.json`: `fetchedAt, account{username, followers_count, media_count}, media[], followersSeries[{at, n}], dailyFollows{\"YYYY-MM-DD\" (Tehran): {total, …follow_type breakdown}}`.\n`media[]`: `id, caption, media_type (IMAGE|VIDEO|CAROUSEL_ALBUM), media_product_type (FEED|REELS), permalink, timestamp (UTC), like_count, comments_count, checkpoints{\"24\"|\"72\"|\"168\"|\"720\": {at, ageH, m}}, latest{at, ageH, m}, noInsights?{at, error}`.\n`m` uses API names: `views, reach, likes, comments, shares, saved, reposts, total_interactions`, feed only `follows, profile_visits`, reels only `ig_reels_avg_watch_time` and `ig_reels_video_view_total_time` (milliseconds), `reels_skip_rate` (%).\nApp posts linked to Instagram carry `igId`. To link the rest, match on the Tehran date of `timestamp` plus caption content and write `link` suggestions. When two candidates fit equally, don't guess: list them in the report.\n`status.json`: `ok, errorCode (no-token|token|permission|rate|network|api), error, warnings[], lastRunAt`. Tell him about any problem it shows; `permission` means the token lacks `instagram_business_manage_insights`.\n\n## Insights screenshots\n\nWhen he sends screenshots of Instagram Insights, match each to a post (title or date → `itemId`), read the numbers exactly and skip anything unreadable.\nMap: Accounts reached → `reach`; Views → `views`; the percentages beside interactions → `*Pct`; average watch time → `avgWatch` in seconds; skip rate → `skipRate`; follows → `follows`; traffic sources → `src`; follower share → `followersPct`.\nSet `t` to the hours since publishing when known, else a `label`. Write `snapshot` suggestions, or `post` suggestions for posts the app doesn't have.\n\n## Voice and values\n\nPersian, conversational, concrete, tied to his own past numbers and his audience (adults 25–54 losing weight with diet or injections).\nScientific accuracy first, uncertainty disclosed, no patient shaming, no drug brand names in his own text.\nJudge ideas by whether they grow the page and bring patients (dm/booking leads), not by views alone.\n";
 const REPO_WORKFLOW = "name: instagram\non:\n  schedule:\n    - cron: '17 */3 * * *'\n  workflow_dispatch:\npermissions:\n  contents: write\nconcurrency:\n  group: instagram\n  cancel-in-progress: false\njobs:\n  fetch:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - name: Fetch Instagram data\n        env:\n          IG_TOKEN: ${{ secrets.IG_TOKEN }}\n          STUDIO_PAT: ${{ secrets.STUDIO_PAT }}\n        run: node scripts/instagram-sync.mjs\n      - name: Commit\n        run: |\n          git config user.name \"studio-bot\"\n          git config user.email \"github-actions[bot]@users.noreply.github.com\"\n          git add instagram\n          if git diff --cached --quiet; then exit 0; fi\n          git commit -m \"instagram: $(date -u +%Y-%m-%dT%H:%MZ)\"\n          for i in 1 2 3 4 5; do\n            git pull --rebase origin \"${GITHUB_REF_NAME}\" && git push origin \"HEAD:${GITHUB_REF_NAME}\" && exit 0\n            sleep $((i * 5))\n          done\n          exit 1\n";
 const REPO_IG_SCRIPT = "// دریافت آمار اینستاگرام برای «استودیو محتوا»\n// در GitHub Actions اجرا می‌شود (فایل .github/workflows/instagram.yml) و خروجی را در پوشه‌ی instagram/ می‌نویسد.\n// فقط از ماژول‌های خود Node استفاده می‌کند. Secrets: IG_TOKEN (اجباری)، STUDIO_PAT (برای تمدید خودکار توکن).\nimport fs from 'node:fs';\nimport path from 'node:path';\nimport { spawnSync } from 'node:child_process';\n\nconst TOKEN = (process.env.IG_TOKEN || '').trim();\nconst PAT = (process.env.STUDIO_PAT || '').trim();\nconst REPO = process.env.GITHUB_REPOSITORY || '';\nconst API_BASE = (process.env.IG_API_BASE || 'https://graph.instagram.com').replace(/\\/+$/, '');\nconst VERSION = process.env.IG_API_VERSION || 'v25.0';\nconst OUT = process.env.STUDIO_OUT || 'instagram';\nconst NOW = new Date(process.env.STUDIO_NOW || Date.now());\nconst HOUR = 3600000;\n\nconst CHECKPOINTS = [24, 72, 168, 720];\nconst WINDOW = { 24: 12, 72: 24, 168: 48, 720: 120 }; // اگر دیرتر از این برسیم، آن مقطع ثبت نمی‌شود\nconst RECENT_H = 45 * 24; // پست‌های تازه‌تر از این، هر بار به‌روز می‌شوند\nconst OLD_REFRESH_H = 7 * 24; // پست‌های قدیمی هفته‌ای یک بار\nconst MAX_MEDIA = 600;\n\nconst REELS_METRICS = ['views', 'reach', 'likes', 'comments', 'shares', 'saved', 'reposts', 'total_interactions', 'ig_reels_avg_watch_time', 'ig_reels_video_view_total_time', 'reels_skip_rate'];\nconst FEED_METRICS = ['views', 'reach', 'likes', 'comments', 'shares', 'saved', 'reposts', 'total_interactions', 'follows', 'profile_visits'];\n\nclass ApiError extends Error {\n  constructor(message, code, status) {\n    super(message);\n    this.code = code;\n    this.status = status;\n  }\n}\n\nconst sleep = (ms) => new Promise((r) => setTimeout(r, ms));\nconst round1 = (n) => Math.round(n * 10) / 10;\nconst isToken = (e) => e && (e.code === 190 || e.code === 102);\nconst isRate = (e) => e && [4, 17, 32, 613].includes(e.code);\n// توکنی که مجوز instagram_business_manage_insights ندارد؛ این خطا مال همه‌ی پست‌هاست، نه یک شاخص\nconst isPerm = (e) => e && (e.code === 10 || (e.code >= 200 && e.code < 300)) && /permission/i.test(String(e.message || ''));\nconst fa = (n) => String(n).replace(/\\d/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[d]);\nconst NO_INSIGHTS_RETRY_H = 7 * 24; // پستی که Insights ندارد (مثلاً قبل از حرفه‌ای شدن پیج)، هفته‌ای یک بار دوباره امتحان می‌شود\n\nfunction readJSON(file, fallback) {\n  try {\n    return JSON.parse(fs.readFileSync(file, 'utf8'));\n  } catch (e) {\n    return fallback;\n  }\n}\n\nfunction writeJSON(file, data) {\n  fs.mkdirSync(path.dirname(file), { recursive: true });\n  fs.writeFileSync(file, JSON.stringify(data, null, 1) + '\\n');\n}\n\nfunction normTs(ts) {\n  return String(ts || '').replace(/([+-]\\d\\d)(\\d\\d)$/, '$1:$2');\n}\n\nasync function getJSON(url) {\n  for (let attempt = 0; attempt < 3; attempt++) {\n    let res;\n    try {\n      res = await fetch(url, { headers: { Accept: 'application/json' } });\n    } catch (e) {\n      if (attempt === 2) throw new ApiError('network: ' + e.message, 'network');\n      await sleep(2000 * (attempt + 1));\n      continue;\n    }\n    const text = await res.text();\n    let data = null;\n    try { data = JSON.parse(text); } catch (e) { data = null; }\n    if (res.ok && data && !data.error) return data;\n    if (res.status >= 500 && attempt < 2) {\n      await sleep(2000 * (attempt + 1));\n      continue;\n    }\n    const err = data && data.error ? data.error : { message: 'HTTP ' + res.status };\n    throw new ApiError(err.message || 'error', err.code, res.status);\n  }\n  throw new ApiError('unreachable', 'network');\n}\n\nfunction apiUrl(p, params) {\n  const url = new URL(API_BASE + '/' + VERSION + p);\n  for (const [k, v] of Object.entries(params || {})) url.searchParams.set(k, String(v));\n  url.searchParams.set('access_token', TOKEN);\n  return url.toString();\n}\n\nconst api = (p, params) => getJSON(apiUrl(p, params));\n\nasync function listMedia() {\n  const fields = 'id,caption,media_type,media_product_type,permalink,timestamp,thumbnail_url,like_count,comments_count';\n  let page = await api('/me/media', { fields, limit: 50 });\n  const out = [...(page.data || [])];\n  while (page.paging && page.paging.next && out.length < MAX_MEDIA) {\n    page = await getJSON(page.paging.next);\n    out.push(...(page.data || []));\n  }\n  return out;\n}\n\nfunction parseInsights(d) {\n  const out = {};\n  for (const row of (d && d.data) || []) {\n    let v = null;\n    if (Array.isArray(row.values) && row.values.length) v = row.values[0].value;\n    else if (row.total_value) v = row.total_value.value;\n    if (typeof v === 'number') out[row.name] = v;\n  }\n  return out;\n}\n\n// شاخصی که برای چند پست خطا بدهد و برای هیچ پستی جواب ندهد، تا یک هفته درخواست نمی‌شود\nconst failCount = {};\nconst okMetric = {};\nlet knownSkip = {};\nconst skipMetric = (kind, m) => (knownSkip[kind] || []).includes(m) || ((failCount[kind + ':' + m] || 0) >= 3 && !okMetric[kind + ':' + m]);\nconst fatal = (e) => isToken(e) || isRate(e) || isPerm(e) || e.code === 'network';\nlet lastInsightsErr = null;\n\nasync function mediaInsights(m) {\n  const kind = m.media_product_type === 'REELS' ? 'REELS' : 'FEED';\n  const want = (kind === 'REELS' ? REELS_METRICS : FEED_METRICS).filter((x) => !skipMetric(kind, x));\n  lastInsightsErr = null;\n  if (!want.length) return {};\n  try {\n    const res = parseInsights(await api('/' + m.id + '/insights', { metric: want.join(',') }));\n    for (const k of Object.keys(res)) okMetric[kind + ':' + k] = true;\n    return res;\n  } catch (e) {\n    if (fatal(e)) throw e;\n    lastInsightsErr = e;\n  }\n  const out = {};\n  for (const metric of want) {\n    try {\n      Object.assign(out, parseInsights(await api('/' + m.id + '/insights', { metric })));\n      okMetric[kind + ':' + metric] = true;\n    } catch (e) {\n      if (fatal(e)) throw e;\n      failCount[kind + ':' + metric] = (failCount[kind + ':' + metric] || 0) + 1;\n      lastInsightsErr = e;\n    }\n  }\n  return out;\n}\n\nfunction dueCheckpoint(ageH, cps) {\n  return CHECKPOINTS.some((c) => ageH >= c && ageH < c + WINDOW[c] && !cps[c]);\n}\n\n// روزهای تقویمی به وقت تهران (UTC+03:30)\nconst TEHRAN = 3.5 * HOUR;\nfunction tehranDay(t) {\n  return new Date(t + TEHRAN).toISOString().slice(0, 10);\n}\nfunction tehranDayStart(dayStr) {\n  return Date.parse(dayStr + 'T00:00:00Z') - TEHRAN;\n}\n\nasync function fillDailyFollows(daily) {\n  const today = tehranDay(NOW.getTime());\n  const days = [];\n  const back = Object.keys(daily).length ? 4 : 30;\n  for (let i = back; i >= 1; i--) days.push(tehranDay(NOW.getTime() - i * 24 * HOUR));\n  days.push(today);\n  for (const day of days) {\n    const since = Math.floor(tehranDayStart(day) / 1000);\n    const until = Math.min(Math.floor(NOW.getTime() / 1000), since + 86400);\n    if (until <= since) continue;\n    const d = await api('/me/insights', { metric: 'follows_and_unfollows', period: 'day', metric_type: 'total_value', breakdown: 'follow_type', since, until });\n    const row = (d.data || [])[0];\n    if (!row || !row.total_value) continue;\n    const rec = { total: row.total_value.value != null ? row.total_value.value : null };\n    for (const b of row.total_value.breakdowns || []) {\n      for (const r of b.results || []) rec[(r.dimension_values || []).join('/') || 'value'] = r.value;\n    }\n    daily[day] = rec;\n  }\n  const keys = Object.keys(daily).sort();\n  while (keys.length > 400) delete daily[keys.shift()];\n}\n\nasync function maybeRefreshToken(status) {\n  if (!TOKEN || status.errorCode === 'token') return;\n  if (!status.tokenSeenAt) status.tokenSeenAt = NOW.toISOString();\n  const last = status.tokenRefreshedAt ? Date.parse(status.tokenRefreshedAt) : 0;\n  if (NOW.getTime() - last < 6 * 24 * HOUR) return;\n  if (!PAT) {\n    status.warnings.push('برای تمدید خودکار توکن اینستاگرام، STUDIO_PAT رو هم توی Secrets بذار؛ وگرنه توکن حدود ۶۰ روز بعد از ساختنش منقضی می‌شه.');\n    return;\n  }\n  if (!last && NOW.getTime() - Date.parse(status.tokenSeenAt) < 25 * HOUR) return; // توکن باید دست‌کم ۲۴ ساعت عمر داشته باشد\n  try {\n    const url = new URL(API_BASE + '/refresh_access_token');\n    url.searchParams.set('grant_type', 'ig_refresh_token');\n    url.searchParams.set('access_token', TOKEN);\n    const d = await getJSON(url.toString());\n    if (!d.access_token) throw new Error('پاسخ بدون توکن بود');\n    const r = spawnSync('gh', ['secret', 'set', 'IG_TOKEN', '--repo', REPO], { input: d.access_token, env: Object.assign({}, process.env, { GH_TOKEN: PAT }), encoding: 'utf8' });\n    if (r.status !== 0) throw new Error('ذخیره‌ی Secret نشد: ' + String(r.stderr || r.error || '').slice(0, 200));\n    status.tokenRefreshedAt = NOW.toISOString();\n    status.tokenExpiresAt = new Date(NOW.getTime() + (Number(d.expires_in) || 5184000) * 1000).toISOString();\n  } catch (e) {\n    status.warnings.push('تمدید توکن اینستاگرام انجام نشد: ' + e.message);\n  }\n}\n\nasync function main() {\n  const status = readJSON(path.join(OUT, 'status.json'), {});\n  const prev = readJSON(path.join(OUT, 'media.json'), {});\n  status.kind = 'studio-instagram-status';\n  status.lastRunAt = NOW.toISOString();\n  status.apiVersion = VERSION;\n  status.warnings = [];\n  const skipFresh = status.skipMetrics && status.skipMetrics.at && NOW.getTime() - Date.parse(status.skipMetrics.at) < 7 * 24 * HOUR;\n  knownSkip = skipFresh ? status.skipMetrics : {};\n  if (!TOKEN) {\n    // فقط بار اول نوشته می‌شود تا هر ۳ ساعت یک commit بی‌فایده ساخته نشود\n    if (status.errorCode !== 'no-token') {\n      Object.assign(status, { ok: false, errorCode: 'no-token', error: 'IG_TOKEN در Secrets ریپو نیست' });\n      writeJSON(path.join(OUT, 'status.json'), status);\n    }\n    console.log('IG_TOKEN is not set; nothing to do.');\n    return;\n  }\n  try {\n    const me = await api('/me', { fields: 'user_id,username,account_type,followers_count,follows_count,media_count' });\n    const media = await listMedia();\n    const prevById = new Map((prev.media || []).map((m) => [m.id, m]));\n    const out = [];\n    let fetched = 0;\n    let failed = 0;\n    let noInsights = 0;\n    let rateHit = false;\n    let permError = null;\n    for (const m of media) {\n      const old = prevById.get(m.id) || {};\n      const ts = Date.parse(normTs(m.timestamp));\n      const ageH = (NOW.getTime() - ts) / HOUR;\n      const rec = {\n        id: m.id, caption: m.caption || '', media_type: m.media_type, media_product_type: m.media_product_type, permalink: m.permalink,\n        timestamp: m.timestamp, thumbnail_url: m.thumbnail_url || null, like_count: m.like_count, comments_count: m.comments_count,\n        checkpoints: old.checkpoints || {}, latest: old.latest || null,\n      };\n      const lastAt = old.latest ? Date.parse(old.latest.at) : 0;\n      const resting = old.noInsights && (NOW.getTime() - Date.parse(old.noInsights.at)) / HOUR < NO_INSIGHTS_RETRY_H;\n      if (resting) {\n        rec.noInsights = old.noInsights;\n        noInsights++;\n      }\n      const due = !rateHit && !permError && !resting && m.media_product_type !== 'STORY' && Number.isFinite(ageH) &&\n        (ageH < RECENT_H || !old.latest || (NOW.getTime() - lastAt) / HOUR >= OLD_REFRESH_H || dueCheckpoint(ageH, rec.checkpoints));\n      if (due) {\n        try {\n          const metrics = await mediaInsights(m);\n          if (Object.keys(metrics).length) {\n            const snap = { at: NOW.toISOString(), ageH: round1(ageH), m: metrics };\n            rec.latest = snap;\n            for (const c of CHECKPOINTS) if (ageH >= c && ageH < c + WINDOW[c] && !rec.checkpoints[c]) rec.checkpoints[c] = snap;\n            fetched++;\n          } else if (lastInsightsErr && lastInsightsErr.code === 100) {\n            // این پست اصلاً Insights ندارد؛ تا یک هفته دوباره درخواست نمی‌شود\n            rec.noInsights = { at: NOW.toISOString(), error: String(lastInsightsErr.message || '').slice(0, 160) };\n            noInsights++;\n          } else failed++;\n        } catch (e) {\n          if (isToken(e)) throw e;\n          if (isPerm(e)) {\n            permError = e;\n          } else if (isRate(e)) {\n            rateHit = true;\n            status.warnings.push('به سقف تعداد درخواست اینستاگرام رسیدیم؛ بقیه‌ی آمارها دفعه‌ی بعد گرفته می‌شن.');\n          } else failed++;\n        }\n      }\n      out.push(rec);\n    }\n    if (failed) status.warnings.push('آمار ' + fa(failed) + ' پست گرفته نشد.');\n    if (noInsights) status.warnings.push(fa(noInsights) + ' پست آمار Insights ندارن (معمولاً پست‌های قبل از حرفه‌ای شدن پیج)؛ هفته‌ای یک بار دوباره امتحان می‌شن.');\n    const series = Array.isArray(prev.followersSeries) ? prev.followersSeries : [];\n    if (typeof me.followers_count === 'number') {\n      const last = series[series.length - 1];\n      if (!last || last.n !== me.followers_count || NOW.getTime() - Date.parse(last.at) > 6 * HOUR) series.push({ at: NOW.toISOString(), n: me.followers_count });\n    }\n    const daily = prev.dailyFollows && typeof prev.dailyFollows === 'object' ? prev.dailyFollows : {};\n    if (!permError && (!status.dailyAt || NOW.getTime() - Date.parse(status.dailyAt) > 12 * HOUR)) {\n      try {\n        await fillDailyFollows(daily);\n        status.dailyAt = NOW.toISOString();\n      } catch (e) {\n        if (isToken(e)) throw e;\n        status.warnings.push('فالوورهای روزانه گرفته نشد: ' + e.message);\n      }\n    }\n    const account = { id: me.user_id || me.id, username: me.username, account_type: me.account_type, followers_count: me.followers_count, follows_count: me.follows_count, media_count: me.media_count };\n    writeJSON(path.join(OUT, 'media.json'), { kind: 'studio-instagram', version: 1, fetchedAt: NOW.toISOString(), account, media: out, followersSeries: series.slice(-3000), dailyFollows: daily });\n    if (permError) {\n      // فهرست پست‌ها (تاریخ، ساعت، لینک، لایک و کامنت) نوشته شد؛ فقط آمارها مجوز ندارند\n      Object.assign(status, { ok: false, errorCode: 'permission', error: String(permError.message || '').slice(0, 300), account, mediaCount: out.length, insightsFetched: fetched });\n    } else {\n      Object.assign(status, { ok: true, errorCode: null, error: null, account, mediaCount: out.length, insightsFetched: fetched });\n    }\n    if (!skipFresh && !permError) {\n      const skip = { at: NOW.toISOString(), REELS: [], FEED: [] };\n      for (const key of Object.keys(failCount)) {\n        const [kind, metric] = key.split(':');\n        if (failCount[key] >= 2 && !okMetric[key]) skip[kind].push(metric);\n      }\n      status.skipMetrics = skip;\n    }\n    console.log('media: ' + out.length + ', insights fetched: ' + fetched + ', failed: ' + failed);\n  } catch (e) {\n    const code = isToken(e) ? 'token' : e.code === 'network' ? 'network' : isRate(e) ? 'rate' : 'api';\n    Object.assign(status, { ok: false, errorCode: code, error: String(e.message || e).slice(0, 300) });\n    console.log('error: ' + code + ' ' + e.message);\n  }\n  await maybeRefreshToken(status);\n  writeJSON(path.join(OUT, 'status.json'), status);\n}\n\nmain().catch((e) => {\n  console.error(e);\n  process.exitCode = 1;\n});\n";
 

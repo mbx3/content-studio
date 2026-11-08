@@ -1,6 +1,6 @@
 /* استودیو محتوا — استایل‌ها
    پالت: کاغذی #EDEAE3، زغالی #1E1E1E، طلایی #C9A227 (رنگ‌های برند پیج)
-   رنگ سری‌ها --s0 تا --s6 برای خوانایی در نمودار، در هر دو حالت روشن و تیره جدا تنظیم شده‌اند. */
+   رنگ سری‌ها --s0 تا --s11 برای خوانایی در نمودار، در هر دو حالت روشن و تیره جدا تنظیم شده‌اند. */
 
 @font-face { font-family: 'Vazirmatn'; font-style: normal; font-weight: 400; font-display: swap; src: local('Vazirmatn'), local('Vazirmatn Regular'), url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v32.0.0/fonts/webfonts/Vazirmatn-Regular.woff2') format('woff2'); }
 @font-face { font-family: 'Vazirmatn'; font-style: normal; font-weight: 500; font-display: swap; src: local('Vazirmatn Medium'), url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v32.0.0/fonts/webfonts/Vazirmatn-Medium.woff2') format('woff2'); }
@@ -30,6 +30,7 @@
   --bad: #B03A2E;
   --warn: #8F5B00;
   --s0: #C1633B; --s1: #00849E; --s2: #B7791F; --s3: #7E3F7C; --s4: #6E8A2B; --s5: #3A68B8; --s6: #A8486F;
+  --s7: #3B4A7A; --s8: #2E7D5B; --s9: #8C5A3C; --s10: #5E6B75; --s11: #B23A48;
   --top-h: 56px;
   --nav-h: 62px;
   --maxw: 560px;
@@ -43,6 +44,7 @@
     --hero: #29241A; --hero-ink: #F1EDE4; --hero-2: #BDB4A2; --hero-line: rgba(241, 237, 228, 0.13);
     --fab-bg: #C9A227; --fab-ink: #1E1E1E; --good: #62B884; --bad: #E58373; --warn: #DDA640;
     --s0: #C96841; --s1: #0F8FA6; --s2: #BD8629; --s3: #A15A9E; --s4: #7A9934; --s5: #5884CF; --s6: #BF6188;
+    --s7: #7383C2; --s8: #4FA57E; --s9: #B5805F; --s10: #8E9BA5; --s11: #DA6572;
   }
 }
 :root[data-theme="dark"] {
@@ -52,6 +54,7 @@
   --hero: #29241A; --hero-ink: #F1EDE4; --hero-2: #BDB4A2; --hero-line: rgba(241, 237, 228, 0.13);
   --fab-bg: #C9A227; --fab-ink: #1E1E1E; --good: #62B884; --bad: #E58373; --warn: #DDA640;
   --s0: #C96841; --s1: #0F8FA6; --s2: #BD8629; --s3: #A15A9E; --s4: #7A9934; --s5: #5884CF; --s6: #BF6188;
+    --s7: #7383C2; --s8: #4FA57E; --s9: #B5805F; --s10: #8E9BA5; --s11: #DA6572;
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -715,3 +718,9 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.92em;
   .kpis.three { grid-template-columns: repeat(3, 1fr); }
   .mtiles { grid-template-columns: repeat(3, 1fr); }
 }
+
+/* کد رنگ دلخواه سری */
+.hex-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.hex-pick { width: 52px; height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--field); flex: none; }
+.hex-text { flex: 1; font-family: ui-monospace, monospace; text-align: left; }
+.hex-text.bad { border-color: var(--bad); }
